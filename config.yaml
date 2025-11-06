@@ -1,0 +1,108 @@
+# GB BESS Market Analysis Configuration
+
+project:
+  name: "GB BESS Market Analysis"
+  version: "0.1.0"
+  author: "Your Name"
+
+# Data collection settings
+data_collection:
+  # Date range for historical data
+  start_date: "2020-01-01"
+  end_date: "2024-10-24"
+  
+  # Update frequency for automated collection
+  update_frequency: "daily"  # daily, weekly, monthly
+
+# API Configuration
+apis:
+  national_grid_eso:
+    base_url: "https://data.nationalgrideso.com"
+    # Key datasets to collect
+    datasets:
+      dynamic_containment: "dynamic-containment-data"
+      dynamic_regulation: "dynamic-regulation-data"
+      dynamic_moderation: "dynamic-moderation-data"
+      system_frequency: "system-frequency-data"
+      demand: "historic-demand-data"
+    rate_limit: 100  # requests per minute
+    
+  elexon:
+    base_url: "https://api.bmreports.com/BMRS"
+    # Get API key from: https://www.elexonportal.co.uk/
+    api_key_env: "ELEXON_API_KEY"
+    endpoints:
+      system_prices: "B1770"  # System Sell and Buy Prices
+      imbalance_prices: "B1780"  # Imbalance Prices
+      balancing_services: "B1440"  # Balancing Services Adjustment Data
+      frequency_response: "FREQ"  # System Frequency
+      generation_by_fuel: "B1620"  # Actual Generation Output
+      day_ahead_prices: "B1430"  # Day-Ahead Prices
+    rate_limit: 60  # requests per minute
+
+# Market segments to analyze
+markets:
+  - "Dynamic Containment (DC)"
+  - "Dynamic Regulation (DR)"
+  - "Dynamic Moderation (DM)"
+  - "Balancing Mechanism (BM)"
+  - "Frequency Response (FR)"
+  - "Day-Ahead Market"
+
+# Analysis parameters
+analysis:
+  # Time series analysis
+  frequency: "30T"  # 30-minute settlement periods
+  
+  # Seasonal decomposition
+  seasonal_period: 48  # 48 half-hourly periods = 1 day
+  
+  # Outlier detection
+  outlier_threshold: 3  # standard deviations
+  
+  # Feature engineering
+  lag_features: [1, 2, 48, 96]  # 30min, 1h, 1day, 2days
+  rolling_windows: [48, 336]  # 1 day, 1 week
+
+# Forecasting parameters
+forecasting:
+  # Train/test split
+  test_size: 0.2
+  
+  # Forecast horizon
+  horizon: 48  # 48 periods = 1 day ahead
+  
+  # Models to compare
+  models:
+    - "arima"
+    - "prophet"
+    - "random_forest"
+    - "gradient_boosting"
+  
+  # Cross-validation
+  cv_folds: 5
+  
+  # Hyperparameter tuning
+  tune_hyperparameters: true
+  n_trials: 50  # for grid search
+
+# Visualization settings
+visualization:
+  # Color scheme
+  color_palette: "plotly"
+  
+  # Plot defaults
+  figure_width: 1200
+  figure_height: 600
+  
+  # Streamlit settings
+  streamlit:
+    page_title: "GB BESS Market Dashboard"
+    page_icon: "🔋"
+    layout: "wide"
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+  file: "logs/bess_analysis.log"
