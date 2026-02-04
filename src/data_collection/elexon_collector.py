@@ -15,7 +15,8 @@ Endpoints used:
 import requests
 import pandas as pd
 import time
-from typing import Optional, Dict
+from datetime import timedelta
+from typing import Optional, Dict, List, Tuple
 from loguru import logger
 
 from ..utils import (
@@ -23,9 +24,27 @@ from ..utils import (
     setup_logging,
     save_dataframe,
     generate_date_range,
+    parse_date,
 )
 
 BASE_URL = "https://data.elexon.co.uk/bmrs/api/v1"
+
+# The Insights API rejects requests spanning more than ~8 days for
+# market-index and FUELHH.  We chunk into 7-day windows to stay safe.
+_CHUNK_DAYS = 7
+
+
+def _date_chunks(start_date: str, end_date: str) -> List[Tuple[str, str]]:
+    """Split a date range into <= 7-day windows."""
+    start = parse_date(start_date)
+    end = parse_date(end_date)
+    chunks = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(cursor + timedelta(days=_CHUNK_DAYS - 1), end)
+        chunks.append((cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
+        cursor = chunk_end + timedelta(days=1)
+    return chunks
 
 
 class ElexonBMRSCollector:
@@ -97,7 +116,6 @@ class ElexonBMRSCollector:
             except requests.RequestException as e:
                 logger.warning(f"Failed for {date_str}: {e}")
 
-        # Filter out any empty frames before concat to avoid FutureWarning
         frames = [f for f in frames if not f.empty]
         if not frames:
             logger.warning("No system price data retrieved")
@@ -127,35 +145,41 @@ class ElexonBMRSCollector:
         """
         Collect Market Index Price & Volume (imbalance proxy).
 
-        This endpoint accepts from/to query params and returns all records
-        in a single response.
+        The endpoint caps responses at ~8 days, so we chunk the range
+        into 7-day windows and concatenate.
         """
         logger.info(f"Collecting market index prices from {start_date} to {end_date}")
+        frames = []
 
-        try:
-            data = self._get(
-                "/balancing/pricing/market-index",
-                params={"from": start_date, "to": end_date},
-            )
-            records = data.get("data", [])
-            if not records:
-                logger.warning("No market index data returned")
-                return pd.DataFrame()
+        for chunk_start, chunk_end in _date_chunks(start_date, end_date):
+            try:
+                data = self._get(
+                    "/balancing/pricing/market-index",
+                    params={"from": chunk_start, "to": chunk_end},
+                )
+                records = data.get("data", [])
+                if records:
+                    frames.append(pd.DataFrame(records))
+            except requests.RequestException as e:
+                logger.warning(
+                    f"Market index chunk {chunk_start}–{chunk_end} failed: {e}"
+                )
 
-            df = pd.DataFrame(records)
-            df["settlementDate"] = pd.to_datetime(df["settlementDate"])
-            df["startTime"] = pd.to_datetime(df["startTime"])
-            logger.info(f"Collected {len(df)} market index records")
-
-            if save:
-                filename = f"market_index_{start_date}_{end_date}"
-                save_dataframe(df, filename, data_type="raw", format="csv")
-
-            return df
-
-        except requests.RequestException as e:
-            logger.error(f"Failed to collect market index prices: {e}")
+        frames = [f for f in frames if not f.empty]
+        if not frames:
+            logger.warning("No market index data retrieved")
             return pd.DataFrame()
+
+        df = pd.concat(frames, ignore_index=True)
+        df["settlementDate"] = pd.to_datetime(df["settlementDate"])
+        df["startTime"] = pd.to_datetime(df["startTime"])
+        logger.info(f"Collected {len(df)} market index records")
+
+        if save:
+            filename = f"market_index_{start_date}_{end_date}"
+            save_dataframe(df, filename, data_type="raw", format="csv")
+
+        return df
 
     # ------------------------------------------------------------------
     # Generation by Fuel Type  (was B1620)
@@ -169,37 +193,45 @@ class ElexonBMRSCollector:
     ) -> pd.DataFrame:
         """
         Collect half-hourly generation output by fuel type (FUELHH dataset).
+
+        The endpoint caps responses at ~8 days, so we chunk the range.
         """
         logger.info(f"Collecting generation by fuel from {start_date} to {end_date}")
+        frames = []
 
-        try:
-            data = self._get(
-                "/datasets/FUELHH",
-                params={
-                    "settlementDateFrom": start_date,
-                    "settlementDateTo": end_date,
-                },
-            )
-            records = data.get("data", [])
-            if not records:
-                logger.warning("No generation data returned")
-                return pd.DataFrame()
+        for chunk_start, chunk_end in _date_chunks(start_date, end_date):
+            try:
+                data = self._get(
+                    "/datasets/FUELHH",
+                    params={
+                        "settlementDateFrom": chunk_start,
+                        "settlementDateTo": chunk_end,
+                    },
+                )
+                records = data.get("data", [])
+                if records:
+                    frames.append(pd.DataFrame(records))
+            except requests.RequestException as e:
+                logger.warning(
+                    f"FUELHH chunk {chunk_start}–{chunk_end} failed: {e}"
+                )
 
-            df = pd.DataFrame(records)
-            df["settlementDate"] = pd.to_datetime(df["settlementDate"])
-            df["startTime"] = pd.to_datetime(df["startTime"])
-            df["publishTime"] = pd.to_datetime(df["publishTime"])
-            logger.info(f"Collected {len(df)} generation records")
-
-            if save:
-                filename = f"generation_by_fuel_{start_date}_{end_date}"
-                save_dataframe(df, filename, data_type="raw", format="csv")
-
-            return df
-
-        except requests.RequestException as e:
-            logger.error(f"Failed to collect generation data: {e}")
+        frames = [f for f in frames if not f.empty]
+        if not frames:
+            logger.warning("No generation data retrieved")
             return pd.DataFrame()
+
+        df = pd.concat(frames, ignore_index=True)
+        df["settlementDate"] = pd.to_datetime(df["settlementDate"])
+        df["startTime"] = pd.to_datetime(df["startTime"])
+        df["publishTime"] = pd.to_datetime(df["publishTime"])
+        logger.info(f"Collected {len(df)} generation records")
+
+        if save:
+            filename = f"generation_by_fuel_{start_date}_{end_date}"
+            save_dataframe(df, filename, data_type="raw", format="csv")
+
+        return df
 
     # ------------------------------------------------------------------
     # Convenience: collect everything
