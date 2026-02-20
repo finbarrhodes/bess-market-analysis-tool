@@ -30,7 +30,8 @@ Datasets used:
 import requests
 import pandas as pd
 import time
-from typing import Optional, Dict
+from datetime import date, timedelta
+from typing import Optional, Dict, List
 from loguru import logger
 
 from ..utils import (
@@ -47,14 +48,27 @@ BASE_URL = "https://api.neso.energy/api/3/action"
 #   GET {BASE_URL}/package_show?id=dynamic-containment-data
 # -----------------------------------------------------------------------
 RESOURCE_IDS = {
-    # Auction clearing prices & volumes per service per EFA block
+    # Auction clearing prices & volumes per service per EFA block (Sep 2021 – Nov 2023)
     "results_summary": "888e5029-f786-41d2-bc15-cbfd1d285e96",
     # Per-unit bid/offer detail (DC only, 2020–2021)
     "dc_masterdata": "0b8dbc3c-e05e-44a4-b855-7dd1aa079c68",
     # Indicative volume requirements published ahead of auctions
     "dr_requirements": "d6c576b9-91d5-4c48-bf6d-300c7d7aa6ad",
     "dm_requirements": "2aae8747-776d-4fe5-af9c-adcf38f1af8a",
+    # EAC (Enduring Auction Capability) — successor to DC/DR/DM auctions
+    # Archive: Nov 2023 – Mar 2025 (30-min granularity; aggregated to EFA blocks on load)
+    "eac_archive": "be5c6b0d-a335-4859-93f2-389585b4e9a1",
+    # Current: Apr 2025 – present (same schema; updated daily)
+    "eac_current": "596f29ac-0387-4ba4-a6d3-95c243140707",
 }
+
+# Boundary dates for EAC resources
+_EAC_ARCHIVE_START = "2023-11-02"
+_EAC_ARCHIVE_END   = "2025-03-31"
+_EAC_CURRENT_START = "2025-04-01"
+
+# Response products shared across both EAC resources (H/L split DC, DR, DM)
+_EAC_RESPONSE_PRODUCTS = ("DCH", "DCL", "DRH", "DRL", "DMH", "DML")
 
 
 class NESOCollector:
@@ -247,6 +261,178 @@ class NESOCollector:
             return pd.DataFrame()
 
     # ------------------------------------------------------------------
+    # EAC (Enduring Auction Capability) — Nov 2023 onwards
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _add_efa_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Derive ``efa`` (1–6) and ``efa_date`` from ``deliveryStart``.
+
+        EFA blocks (local clock time — used consistently on NESO portal):
+          EFA 1: 23:00 – 03:00  (starts previous calendar day)
+          EFA 2: 03:00 – 07:00
+          EFA 3: 07:00 – 11:00
+          EFA 4: 11:00 – 15:00
+          EFA 5: 15:00 – 19:00
+          EFA 6: 19:00 – 23:00
+
+        For EFA 1, the EFA date is the *end* date (i.e. deliveryStart.date + 1
+        when hour == 23; deliveryStart.date when hour in 0–2).
+        """
+        ds = pd.to_datetime(df["deliveryStart"])
+        hour = ds.dt.hour
+
+        efa = pd.Series(0, index=df.index)
+        efa_date = ds.dt.date
+
+        efa[(hour >= 23) | (hour < 3)] = 1
+        efa[(hour >= 3) & (hour < 7)]  = 2
+        efa[(hour >= 7) & (hour < 11)] = 3
+        efa[(hour >= 11) & (hour < 15)] = 4
+        efa[(hour >= 15) & (hour < 19)] = 5
+        efa[(hour >= 19) & (hour < 23)] = 6
+
+        # For 23:00 slots the EFA date is the next calendar day
+        next_day_mask = hour >= 23
+        efa_date = pd.to_datetime(efa_date)
+        efa_date[next_day_mask] = efa_date[next_day_mask] + pd.Timedelta(days=1)
+
+        df = df.copy()
+        df["efa"] = efa.astype(int)
+        df["efa_date"] = efa_date.dt.date
+        return df
+
+    def _query_eac_resource(
+        self, resource_id: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """
+        Pull Response products (DCH/DCL/DRH/DRL/DMH/DML) from one EAC resource
+        for the given date range.  Returns raw 30-min rows.
+        """
+        products = ", ".join(f"'{p}'" for p in _EAC_RESPONSE_PRODUCTS)
+        # end_date is inclusive: fetch up to midnight of end_date + 1
+        end_dt = (
+            pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        sql = (
+            f'SELECT "auctionProduct","deliveryStart","deliveryEnd",'
+            f'"clearedVolume","clearingPrice" '
+            f'FROM "{resource_id}" '
+            f'WHERE "auctionProduct" IN ({products}) '
+            f'AND "deliveryStart" >= \'{start_date}\' '
+            f'AND "deliveryStart" < \'{end_dt}\' '
+            f'ORDER BY "deliveryStart" ASC'
+        )
+        return self._datastore_sql(sql)
+
+    def collect_eac_results(
+        self,
+        start_date: str,
+        end_date: str,
+        save: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Collect DC, DR & DM auction results from the EAC platform (Nov 2023 –
+        present) and aggregate the 30-minute delivery windows to 4-hour EFA
+        blocks so that the output schema matches the legacy ``auction_results``
+        files exactly:
+
+          Service, EFA Date, EFA, Delivery Start, Delivery End,
+          Cleared Volume, Clearing Price
+
+        The method automatically routes to the archive resource (Nov 2023 –
+        Mar 2025) or the current resource (Apr 2025 – present), querying both
+        when the requested date range spans the boundary.
+        """
+        logger.info(f"Collecting EAC auction results from {start_date} to {end_date}")
+
+        start = pd.Timestamp(start_date).date()
+        end   = pd.Timestamp(end_date).date()
+        archive_end   = pd.Timestamp(_EAC_ARCHIVE_END).date()
+        current_start = pd.Timestamp(_EAC_CURRENT_START).date()
+
+        frames: List[pd.DataFrame] = []
+
+        # Archive resource
+        if start <= archive_end:
+            chunk_end = min(end, archive_end).strftime("%Y-%m-%d")
+            logger.info(f"  Querying EAC archive ({start_date} – {chunk_end})")
+            df = self._query_eac_resource(
+                RESOURCE_IDS["eac_archive"], start_date, chunk_end
+            )
+            if not df.empty:
+                frames.append(df)
+
+        # Current resource
+        if end >= current_start:
+            chunk_start = max(start, current_start).strftime("%Y-%m-%d")
+            logger.info(f"  Querying EAC current ({chunk_start} – {end_date})")
+            df = self._query_eac_resource(
+                RESOURCE_IDS["eac_current"], chunk_start, end_date
+            )
+            if not df.empty:
+                frames.append(df)
+
+        if not frames:
+            logger.warning(
+                "No EAC records returned — date range may be outside Nov 2023 – present"
+            )
+            return pd.DataFrame()
+
+        raw = pd.concat(frames, ignore_index=True)
+        raw["clearedVolume"] = pd.to_numeric(raw["clearedVolume"], errors="coerce")
+        raw["clearingPrice"] = pd.to_numeric(raw["clearingPrice"], errors="coerce")
+        raw = self._add_efa_columns(raw)
+
+        # Aggregate 30-min slots → EFA blocks
+        # Cleared volume: mean MW across the 8 half-hour windows
+        # Clearing price: volume-weighted average price
+        raw["price_x_vol"] = raw["clearingPrice"] * raw["clearedVolume"]
+
+        agg = (
+            raw.groupby(["auctionProduct", "efa_date", "efa"])
+            .agg(
+                delivery_start=("deliveryStart", "min"),
+                delivery_end=("deliveryStart", "max"),  # last slot start ≈ block end
+                cleared_volume=("clearedVolume", "mean"),
+                total_pxv=("price_x_vol", "sum"),
+                total_vol=("clearedVolume", "sum"),
+            )
+            .reset_index()
+        )
+        agg["clearing_price"] = agg["total_pxv"] / agg["total_vol"].replace(0, pd.NA)
+        agg = agg.drop(columns=["total_pxv", "total_vol"])
+
+        # Rename to match legacy auction_results schema
+        df_out = agg.rename(
+            columns={
+                "auctionProduct": "Service",
+                "efa_date":       "EFA Date",
+                "efa":            "EFA",
+                "delivery_start": "Delivery Start",
+                "delivery_end":   "Delivery End",
+                "cleared_volume": "Cleared Volume",
+                "clearing_price": "Clearing Price",
+            }
+        )
+        df_out["EFA Date"]       = pd.to_datetime(df_out["EFA Date"])
+        df_out["Delivery Start"] = pd.to_datetime(df_out["Delivery Start"])
+        df_out["Delivery End"]   = pd.to_datetime(df_out["Delivery End"])
+        df_out = df_out.sort_values(["EFA Date", "EFA", "Service"]).reset_index(drop=True)
+
+        logger.info(
+            f"Collected {len(df_out)} EAC auction records "
+            f"({len(raw)} raw 30-min slots aggregated)"
+        )
+
+        if save:
+            filename = f"eac_results_{start_date}_{end_date}"
+            save_dataframe(df_out, filename, data_type="raw", format="csv")
+
+        return df_out
+
+    # ------------------------------------------------------------------
     # Convenience: collect everything
     # ------------------------------------------------------------------
 
@@ -259,10 +445,27 @@ class NESOCollector:
         """Collect all available NESO datasets."""
         logger.info(f"Collecting all NESO data from {start_date} to {end_date}")
 
+        eac_start = pd.Timestamp(_EAC_ARCHIVE_START).date()
+        req_start = pd.Timestamp(start_date).date()
+        req_end   = pd.Timestamp(end_date).date()
+
+        # Legacy DC/DR/DM (up to Nov 2023)
+        legacy_end = min(req_end, pd.Timestamp(_EAC_ARCHIVE_START).date() - timedelta(days=1))
+        legacy_results = pd.DataFrame()
+        if req_start <= legacy_end:
+            legacy_results = self.collect_auction_results(
+                start_date, legacy_end.strftime("%Y-%m-%d"), save
+            )
+
+        # EAC data (Nov 2023 onwards)
+        eac_results = pd.DataFrame()
+        if req_end >= eac_start:
+            eac_query_start = max(req_start, eac_start).strftime("%Y-%m-%d")
+            eac_results = self.collect_eac_results(eac_query_start, end_date, save)
+
         data = {
-            "auction_results": self.collect_auction_results(
-                start_date, end_date, save
-            ),
+            "auction_results": legacy_results,
+            "eac_results":     eac_results,
             "dr_requirements": self.collect_dr_requirements(save),
             "dm_requirements": self.collect_dm_requirements(save),
         }

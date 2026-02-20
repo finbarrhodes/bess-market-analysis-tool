@@ -25,46 +25,74 @@ RAW = Path(__file__).parent.parent.parent / "data" / "raw"
 
 
 # ---------------------------------------------------------------------------
-# Data loading (cached)
+# Data loading (cached, glob-based — picks up any files in data/raw/)
 # ---------------------------------------------------------------------------
-@st.cache_data
-def load_auctions():
-    path = RAW / "auction_results_2023-01-01_2023-10-31.csv"
-    if not path.exists():
-        return pd.DataFrame()
-    return pd.read_csv(path, parse_dates=["EFA Date", "Delivery Start", "Delivery End"])
 
-
-@st.cache_data
-def load_system_prices():
-    path = RAW / "system_prices_2023-07-01_2023-10-31.csv"
-    if not path.exists():
+def _concat_csvs(paths: list, parse_dates: list, dedup_cols: list) -> pd.DataFrame:
+    """Load and merge a list of CSV files, deduplicating on key columns."""
+    if not paths:
         return pd.DataFrame()
-    return pd.read_csv(path, parse_dates=["settlementDate", "startTime"])
+    frames = [pd.read_csv(p, parse_dates=parse_dates) for p in paths]
+    merged = pd.concat(frames, ignore_index=True)
+    if dedup_cols and all(c in merged.columns for c in dedup_cols):
+        merged = merged.drop_duplicates(subset=dedup_cols)
+    return merged
 
 
 @st.cache_data
-def load_market_index():
-    path = RAW / "market_index_2023-07-01_2023-10-31.csv"
-    if not path.exists():
+def load_auctions() -> pd.DataFrame:
+    """
+    Merge legacy auction_results_*.csv (Sep 2021 – Nov 2023) with
+    eac_results_*.csv (Nov 2023 – present) into a single DataFrame.
+    Both share the same column schema so they concatenate directly.
+    """
+    legacy_paths = sorted(RAW.glob("auction_results_*.csv"))
+    eac_paths    = sorted(RAW.glob("eac_results_*.csv"))
+    all_paths    = legacy_paths + eac_paths
+    if not all_paths:
         return pd.DataFrame()
-    return pd.read_csv(path, parse_dates=["settlementDate", "startTime"])
+    df = _concat_csvs(
+        all_paths,
+        parse_dates=["EFA Date", "Delivery Start", "Delivery End"],
+        dedup_cols=["Service", "EFA Date", "EFA"],
+    )
+    return df.sort_values("EFA Date").reset_index(drop=True)
 
 
 @st.cache_data
-def load_generation():
-    path = RAW / "generation_by_fuel_2023-07-01_2023-10-31.csv"
-    if not path.exists():
-        return pd.DataFrame()
-    return pd.read_csv(
-        path, parse_dates=["settlementDate", "startTime", "publishTime"]
+def load_system_prices() -> pd.DataFrame:
+    paths = sorted(RAW.glob("system_prices_*.csv"))
+    return _concat_csvs(
+        paths,
+        parse_dates=["settlementDate", "startTime"],
+        dedup_cols=["settlementDate", "settlementPeriod"],
     )
 
 
-auctions = load_auctions()
+@st.cache_data
+def load_market_index() -> pd.DataFrame:
+    paths = sorted(RAW.glob("market_index_*.csv"))
+    return _concat_csvs(
+        paths,
+        parse_dates=["settlementDate", "startTime"],
+        dedup_cols=["settlementDate", "settlementPeriod"],
+    )
+
+
+@st.cache_data
+def load_generation() -> pd.DataFrame:
+    paths = sorted(RAW.glob("generation_by_fuel_*.csv"))
+    return _concat_csvs(
+        paths,
+        parse_dates=["settlementDate", "startTime", "publishTime"],
+        dedup_cols=["settlementDate", "settlementPeriod", "fuelType"],
+    )
+
+
+auctions   = load_auctions()
 sys_prices = load_system_prices()
-mkt_index = load_market_index()
-gen_fuel = load_generation()
+mkt_index  = load_market_index()
+gen_fuel   = load_generation()
 
 # ---------------------------------------------------------------------------
 # Sidebar filters
@@ -76,13 +104,17 @@ if not auctions.empty:
     selected_services = st.sidebar.multiselect(
         "DC/DR/DM Services", all_services, default=all_services
     )
-    auction_filtered = auctions[auctions["Service"].isin(selected_services)]
 
     date_min = auctions["EFA Date"].min().date()
     date_max = auctions["EFA Date"].max().date()
     date_range = st.sidebar.date_input(
-        "Auction date range", value=(date_min, date_max), min_value=date_min, max_value=date_max
+        "Auction date range",
+        value=(date_min, date_max),
+        min_value=date_min,
+        max_value=date_max,
     )
+
+    auction_filtered = auctions[auctions["Service"].isin(selected_services)]
     if len(date_range) == 2:
         auction_filtered = auction_filtered[
             (auction_filtered["EFA Date"].dt.date >= date_range[0])
