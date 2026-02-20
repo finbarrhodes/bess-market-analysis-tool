@@ -12,9 +12,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
 # Page config
-# ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="GB BESS Market Dashboard",
     page_icon="\u26a1",
@@ -24,9 +22,7 @@ st.set_page_config(
 RAW = Path(__file__).parent.parent.parent / "data" / "raw"
 
 
-# ---------------------------------------------------------------------------
 # Data loading (cached, glob-based — picks up any files in data/raw/)
-# ---------------------------------------------------------------------------
 
 def _concat_csvs(paths: list, parse_dates: list, dedup_cols: list) -> pd.DataFrame:
     """Load and merge a list of CSV files, deduplicating on key columns."""
@@ -94,9 +90,7 @@ sys_prices = load_system_prices()
 mkt_index  = load_market_index()
 gen_fuel   = load_generation()
 
-# ---------------------------------------------------------------------------
 # Sidebar filters
-# ---------------------------------------------------------------------------
 st.sidebar.title("Filters")
 
 if not auctions.empty:
@@ -124,9 +118,7 @@ else:
     auction_filtered = auctions
     selected_services = []
 
-# ---------------------------------------------------------------------------
 # Header
-# ---------------------------------------------------------------------------
 st.title("GB BESS Market Dashboard")
 st.markdown("Data from the **Elexon Insights Solution API** and **NESO Data Portal**.")
 
@@ -137,16 +129,12 @@ col2.metric("System Price Records", f"{len(sys_prices):,}")
 col3.metric("Market Index Records", f"{len(mkt_index):,}")
 col4.metric("Generation Records", f"{len(gen_fuel):,}")
 
-# ---------------------------------------------------------------------------
 # Tab layout
-# ---------------------------------------------------------------------------
 tab_auction, tab_spread, tab_system, tab_gen, tab_cross = st.tabs(
     ["DC/DR/DM Auctions", "H vs L Spread", "System Prices", "Generation Mix", "Cross-Source"]
 )
 
-# ---------------------------------------------------------------------------
 # Tab 1: Auctions
-# ---------------------------------------------------------------------------
 with tab_auction:
     if auction_filtered.empty:
         st.warning("No auction data loaded. Run the data collector first.")
@@ -205,9 +193,7 @@ with tab_auction:
         )
         st.dataframe(stats, use_container_width=True)
 
-# ---------------------------------------------------------------------------
 # Tab 2: H vs L Spread
-# ---------------------------------------------------------------------------
 with tab_spread:
     if auctions.empty:
         st.warning("No auction data loaded. Run the data collector first.")
@@ -338,9 +324,7 @@ with tab_spread:
             st.dataframe(summary, use_container_width=True)
 
 
-# ---------------------------------------------------------------------------
 # Tab 3: System Prices
-# ---------------------------------------------------------------------------
 with tab_system:
     if sys_prices.empty:
         st.warning("No system price data loaded.")
@@ -422,9 +406,7 @@ with tab_system:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-# ---------------------------------------------------------------------------
 # Tab 3: Generation Mix
-# ---------------------------------------------------------------------------
 with tab_gen:
     if gen_fuel.empty:
         st.warning("No generation data loaded.")
@@ -466,9 +448,7 @@ with tab_gen:
         fig.update_layout(height=450)
         st.plotly_chart(fig, use_container_width=True)
 
-# ---------------------------------------------------------------------------
 # Tab 4: Cross-source
-# ---------------------------------------------------------------------------
 with tab_cross:
     if sys_prices.empty or auctions.empty:
         st.warning("Need both system price and auction data for cross-source analysis.")

@@ -42,11 +42,9 @@ from ..utils import (
 
 BASE_URL = "https://api.neso.energy/api/3/action"
 
-# -----------------------------------------------------------------------
 # Resource IDs — these are the UUIDs of the CSV resources on the portal.
 # You can discover them yourself via:
 #   GET {BASE_URL}/package_show?id=dynamic-containment-data
-# -----------------------------------------------------------------------
 RESOURCE_IDS = {
     # Auction clearing prices & volumes per service per EFA block (Sep 2021 – Nov 2023)
     "results_summary": "888e5029-f786-41d2-bc15-cbfd1d285e96",
@@ -87,9 +85,7 @@ class NESOCollector:
         setup_logging(config)
         logger.info("NESO Collector initialized (CKAN datastore API)")
 
-    # ------------------------------------------------------------------
     # HTTP / rate-limit helpers
-    # ------------------------------------------------------------------
 
     def _rate_limit_wait(self):
         """Respect the 2 req/min datastore rate limit."""
@@ -166,9 +162,7 @@ class NESOCollector:
         df = df.drop(columns=["_full_text"], errors="ignore")
         return df
 
-    # ------------------------------------------------------------------
     # DC / DR / DM auction results
-    # ------------------------------------------------------------------
 
     def collect_auction_results(
         self,
@@ -222,9 +216,7 @@ class NESOCollector:
             logger.error(f"Failed to collect auction results: {e}")
             return pd.DataFrame()
 
-    # ------------------------------------------------------------------
     # DR / DM requirements (small reference tables)
-    # ------------------------------------------------------------------
 
     def collect_dr_requirements(self, save: bool = True) -> pd.DataFrame:
         """Collect indicative Dynamic Regulation volume requirements."""
@@ -260,9 +252,7 @@ class NESOCollector:
             logger.error(f"Failed to collect DM requirements: {e}")
             return pd.DataFrame()
 
-    # ------------------------------------------------------------------
     # EAC (Enduring Auction Capability) — Nov 2023 onwards
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _add_efa_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -432,9 +422,7 @@ class NESOCollector:
 
         return df_out
 
-    # ------------------------------------------------------------------
     # Convenience: collect everything
-    # ------------------------------------------------------------------
 
     def collect_all_markets(
         self,
@@ -475,9 +463,7 @@ class NESOCollector:
         return data
 
 
-# ----------------------------------------------------------------------
 # Quick smoke-test when run directly
-# ----------------------------------------------------------------------
 
 if __name__ == "__main__":
     config = load_config()

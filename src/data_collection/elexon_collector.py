@@ -63,9 +63,7 @@ class ElexonBMRSCollector:
         setup_logging(config)
         logger.info("Elexon BMRS Collector initialized (Insights Solution API)")
 
-    # ------------------------------------------------------------------
     # HTTP helpers
-    # ------------------------------------------------------------------
 
     def _rate_limit_wait(self):
         """Enforce rate limiting between requests."""
@@ -87,9 +85,7 @@ class ElexonBMRSCollector:
         resp.raise_for_status()
         return resp.json()
 
-    # ------------------------------------------------------------------
     # System Sell / Buy Prices  (was B1770)
-    # ------------------------------------------------------------------
 
     def collect_system_prices(
         self,
@@ -132,9 +128,7 @@ class ElexonBMRSCollector:
 
         return df
 
-    # ------------------------------------------------------------------
     # Market Index Prices  (was B1780)
-    # ------------------------------------------------------------------
 
     def collect_imbalance_prices(
         self,
@@ -181,9 +175,7 @@ class ElexonBMRSCollector:
 
         return df
 
-    # ------------------------------------------------------------------
     # Generation by Fuel Type  (was B1620)
-    # ------------------------------------------------------------------
 
     def collect_generation_by_fuel(
         self,
@@ -233,9 +225,7 @@ class ElexonBMRSCollector:
 
         return df
 
-    # ------------------------------------------------------------------
     # Convenience: collect everything
-    # ------------------------------------------------------------------
 
     def collect_all_markets(
         self,
@@ -259,9 +249,7 @@ class ElexonBMRSCollector:
         return data
 
 
-# ----------------------------------------------------------------------
 # Quick smoke-test when run directly
-# ----------------------------------------------------------------------
 
 if __name__ == "__main__":
     config = load_config()
