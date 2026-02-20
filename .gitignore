@@ -87,3 +87,7 @@ models/*.joblib
 
 # OS
 Thumbs.db
+
+# Local notes
+memory/
+TODOS.md
