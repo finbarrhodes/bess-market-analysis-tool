@@ -21,6 +21,28 @@ st.set_page_config(
 
 RAW = Path(__file__).parent.parent.parent / "data" / "raw"
 
+FUEL_GROUP_MAP = {
+    "CCGT":    "Gas",
+    "OCGT":    "Gas",
+    "NUCLEAR": "Nuclear",
+    "WIND":    "Wind",
+    "NPSHYD":  "Hydro",
+    "BIOMASS": "Biomass",
+    "COAL":    "Coal",
+    "OIL":     "Oil",
+    "PS":      "Pumped Storage",
+    "INTFR":   "Interconnectors",
+    "INTIRL":  "Interconnectors",
+    "INTNED":  "Interconnectors",
+    "INTNEM":  "Interconnectors",
+    "INTNSL":  "Interconnectors",
+    "INTVKL":  "Interconnectors",
+    "INTIFA2": "Interconnectors",
+    "INTEW":   "Interconnectors",
+    "INTELEC": "Interconnectors",
+    "OTHER":   "Other",
+}
+
 
 # Data loading (cached, glob-based — picks up any files in data/raw/)
 
@@ -89,6 +111,8 @@ auctions   = load_auctions()
 sys_prices = load_system_prices()
 mkt_index  = load_market_index()
 gen_fuel   = load_generation()
+if not gen_fuel.empty:
+    gen_fuel["fuelGroup"] = gen_fuel["fuelType"].map(FUEL_GROUP_MAP).fillna("Other")
 
 # Sidebar filters
 st.sidebar.title("Filters")
@@ -411,15 +435,15 @@ with tab_gen:
     if gen_fuel.empty:
         st.warning("No generation data loaded.")
     else:
-        st.subheader("Daily Generation by Fuel Type")
+        st.subheader("Daily Generation by Fuel Group")
         daily_gen = (
-            gen_fuel.groupby(["settlementDate", "fuelType"])["generation"]
+            gen_fuel.groupby(["settlementDate", "fuelGroup"])["generation"]
             .sum()
             .reset_index()
         )
         gen_pivot = daily_gen.pivot_table(
             index="settlementDate",
-            columns="fuelType",
+            columns="fuelGroup",
             values="generation",
             fill_value=0,
         )
@@ -428,20 +452,20 @@ with tab_gen:
 
         melted = gen_pivot.reset_index().melt(
             id_vars="settlementDate",
-            var_name="Fuel Type",
+            var_name="Fuel Group",
             value_name="Generation",
         )
         fig = px.area(
             melted,
             x="settlementDate",
             y="Generation",
-            color="Fuel Type",
+            color="Fuel Group",
             labels={"Generation": "MW", "settlementDate": "Date"},
         )
         fig.update_layout(height=500, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Average Share by Fuel Type")
+        st.subheader("Average Share by Fuel Group")
         fuel_share = gen_pivot.mean()
         fuel_share = fuel_share[fuel_share > 0].sort_values(ascending=False)
         fig = px.pie(values=fuel_share.values, names=fuel_share.index)
