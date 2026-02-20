@@ -1,8 +1,8 @@
-# GB BESS Market Analysis & Forecasting Tool 🔋
+# UK BESS Market Analysis & Forecasting Tool
 
-The goals for this project is the following: A comprehensive Python toolkit for analyzing Great Britain's Battery Energy Storage System (BESS) markets, including historical trend analysis, price forecasting, and market insights.
+The goals for this project is the following: A Python toolkit for analyzing the UK's Battery Energy Storage System (BESS) markets, including historical trend analysis, price forecasting, and market insights. This repo contains data acquisition tools for NESO and Elexon data as well as dashboard visualization using Streamlit. This project serves as a personal endeavor to learn more about and uncover insights into the UK BESS landscape; some of what is outlined below has yet to be implemented/shipped; more to come!
 
-## 📋 Project Overview
+## Project Overview
 
 This project provides:
 - **Data Collection**: Automated scraping from National Grid ESO and Elexon BMRS APIs
@@ -11,7 +11,7 @@ This project provides:
 - **Visualization**: Interactive Plotly dashboards and Streamlit web app
 - **Reporting**: Automated report generation with key insights
 
-## 🎯 Key Features
+## Key Features
 
 - Historical data collection from public APIs (2020-present)
 - Supply-demand driver analysis
@@ -21,7 +21,7 @@ This project provides:
 - Interactive web dashboard
 - Automated report generation
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -46,21 +46,12 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. **Set up API credentials**:
-   - Register for Elexon BMRS API: https://www.elexonportal.co.uk/
-   - Copy `.env.example` to `.env`:
-```bash
-cp .env.example .env
-```
-   - Add your API key to `.env`:
-```
-ELEXON_API_KEY=your_actual_api_key_here
-```
+4. **Configure the project**:
+   - Edit `config.yaml` to adjust date ranges and analysis parameters
 
-5. **Configure the project**:
-   - Edit `config.yaml` to adjust date ranges, markets, and analysis parameters
+Both the NESO Data Portal and Elexon Insights Solution APIs are fully public — no registration or API key is required.
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 gb-bess-market-analysis/
@@ -85,7 +76,7 @@ gb-bess-market-analysis/
 └── README.md            # This file
 ```
 
-## 🔧 Usage
+## Usage
 
 ### 1. Data Collection
 
@@ -105,9 +96,7 @@ python src/data_collection/collect_data.py --start 2024-01-01 --end 2024-01-31 -
 python src/data_collection/collect_data.py
 ```
 
-**Note**: The collectors are set up with proper structure but will need the actual API endpoints verified from the data portals, as these can change. Check:
-- National Grid ESO: https://data.nationalgrideso.com/
-- Elexon BMRS: https://www.elexonportal.co.uk/
+**NESO** collects DC/DR/DM auction clearing prices and EAC results (Sep 2021 – present) via the NESO Data Portal CKAN API. **Elexon** collects System Sell/Buy Prices, Market Index Prices, and half-hourly generation by fuel type via the Elexon Insights Solution API.
 
 ### 2. Run Analysis
 
@@ -125,21 +114,20 @@ python src/forecasting/train_models.py
 
 ### 4. Launch Dashboard
 
-Start the interactive Streamlit dashboard (coming soon):
+Start the interactive Streamlit dashboard:
 ```bash
 streamlit run src/visualization/dashboard.py
 ```
 
-## 📊 Key Markets Analyzed
+## Key Markets Analyzed
 
-- **Dynamic Containment (DC)**: Fast-acting frequency response
-- **Dynamic Regulation (DR)**: Continuous frequency regulation
-- **Dynamic Moderation (DM)**: Slower frequency response
-- **Balancing Mechanism (BM)**: Energy balancing market
-- **Frequency Response (FR)**: Traditional frequency services
-- **Day-Ahead Market**: Energy arbitrage opportunities
+- **Dynamic Containment (DC)**: Fast-acting frequency response (High and Low)
+- **Dynamic Regulation (DR)**: Continuous frequency regulation (High and Low)
+- **Dynamic Moderation (DM)**: Slower frequency response (High and Low)
 
-## 🔮 Forecasting Models
+Additional markets — including the Balancing Mechanism, legacy Frequency Response services, and the Day-Ahead energy market — are planned for future data collection.
+
+## Forecasting Models
 
 The project will implement and compare multiple forecasting approaches:
 
@@ -158,18 +146,17 @@ The project will implement and compare multiple forecasting approaches:
    - Cross-validation
    - Residual analysis
 
-## 📈 Data Sources
+## Data Sources
 
-- **National Grid ESO**: System frequency, demand data
-  - Website: https://www.nationalgrideso.com/
-  - Data Portal: https://data.nationalgrideso.com/
-  
-- **Elexon BMRS**: Market prices, imbalance data
+- **NESO Data Portal**: DC/DR/DM auction clearing prices and volumes, EAC results (Nov 2023 – present)
+  - API: CKAN datastore (`https://api.neso.energy/api/3/action`) — no key required
+  - Website: https://www.neso.energy/
+
+- **Elexon Insights Solution**: System Sell/Buy Prices, Market Index Prices, half-hourly generation by fuel type
+  - API: `https://data.elexon.co.uk/bmrs/api/v1` — no key required
   - Website: https://www.elexon.co.uk/
-  - Portal: https://www.elexonportal.co.uk/
-  - API Docs: https://www.elexon.co.uk/documents/training-guidance/bsc-guidance-notes/bmrs-api-and-data-push-user-guide/
 
-## 🧪 Testing
+## Testing
 
 Run the test suite:
 ```bash
@@ -181,27 +168,7 @@ Run with coverage:
 pytest --cov=src tests/
 ```
 
-## 📝 Development Roadmap
-
-- [x] Project setup and structure
-- [x] Configuration and utilities
-- [x] API data collection modules
-- [ ] Data cleaning and preprocessing
-- [ ] Exploratory data analysis notebook
-- [ ] Market trend analysis
-- [ ] Forecasting model implementation
-- [ ] Model comparison and evaluation
-- [ ] Interactive dashboard
-- [ ] Automated report generation
-- [ ] Documentation and examples
-
-## ⚠️ Important Notes
-
-### API Endpoints
-The data collectors are structured with proper error handling and rate limiting, but you'll need to:
-1. Verify the actual API endpoints from the official documentation
-2. Check the response structure and adjust parsing accordingly
-3. Some endpoints may require authentication beyond just an API key
+## Important Notes
 
 ### Data Availability
 - Dynamic Containment data is typically available from 2020 onwards
@@ -209,27 +176,16 @@ The data collectors are structured with proper error handling and rate limiting,
 - Check data availability windows for each market
 
 ### Rate Limits
-- National Grid ESO: Currently set to 100 requests/minute
-- Elexon BMRS: Currently set to 60 requests/minute
-- Adjust in config.yaml if needed
+- NESO Data Portal (CKAN datastore): 2 requests/minute
+- Elexon Insights Solution: 60 requests/minute
+- Adjust in `config.yaml` if needed
 
-## 🤝 Contributing
 
-This is a portfolio project, but suggestions and feedback are welcome!
 
-## 📄 License
-
-This project is for educational and portfolio purposes.
-
-## 🙏 Acknowledgments
-
-- National Grid ESO for providing open data access
-- Elexon for BMRS data and documentation
-- UK battery storage community for insights
 
 ## 📧 Contact
 
-[Your Name] - [Your Email/LinkedIn]
+Finbar Rhodes - [LinkedIn](https://www.linkedin.com/in/finbar-rhodes-637650210/)
 
 ---
 
