@@ -263,5 +263,3 @@ if __name__ == "__main__":
         if not df.empty:
             print(df.head(3).to_string())
 
-# streamlit run src/visualization/dashboard.py
-
