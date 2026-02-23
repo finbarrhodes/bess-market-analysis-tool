@@ -1,25 +1,21 @@
 # Core data handling
 pandas>=2.0.0
 numpy>=1.24.0
-polars>=0.19.0
+pyarrow>=14.0.0
 
-# API and web requests
+# Visualization & app
+streamlit>=1.36.0
+plotly>=5.17.0
+
+# API and web requests (data collection scripts)
 requests>=2.31.0
 python-dotenv>=1.0.0
 beautifulsoup4>=4.12.0
 ElexonDataPortal>=2.0.14
 
-# Data analysis and forecasting
+# Data analysis and forecasting (future analytical features)
 scikit-learn>=1.3.0
 statsmodels>=0.14.0
-prophet>=1.1.0
-xgboost>=2.0.0
-
-# Visualization
-plotly>=5.17.0
-matplotlib>=3.7.0
-seaborn>=0.12.0
-streamlit>=1.28.0
 
 # Configuration
 pyyaml>=6.0
@@ -28,14 +24,6 @@ pyyaml>=6.0
 tqdm>=4.66.0
 loguru>=0.7.0
 pytz>=2023.3
-
-# Testing
-pytest>=7.4.0
-pytest-cov>=4.1.0
-
-# Jupyter for notebooks
-jupyter>=1.0.0
-ipykernel>=6.25.0
 
 # Data validation
 pydantic>=2.0.0
