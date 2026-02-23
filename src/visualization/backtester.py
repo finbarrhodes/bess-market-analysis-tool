@@ -1,16 +1,15 @@
 """
 BESS Tolling Value Backtester
 ==============================
-Standalone Streamlit app for modelling historical BESS revenue.
-
-Run with:
+Launched as a page via app.py (st.navigation).
+Can still be run standalone for local development:
     streamlit run src/visualization/backtester.py
 """
 
 import sys
 from pathlib import Path
 
-# Ensure src/ is on the path when launched from any working directory
+# Ensure src/ is on the path when launched standalone from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import streamlit as st
@@ -28,55 +27,42 @@ from src.analysis.revenue_stack import (
 )
 
 # ---------------------------------------------------------------------------
-# Page config
+# Standalone guard — set_page_config only when run directly, not via app.py
 # ---------------------------------------------------------------------------
+try:
+    st.set_page_config(
+        page_title="BESS Tolling Value Backtester",
+        page_icon="🔋",
+        layout="wide",
+    )
+except st.errors.StreamlitAPIException:
+    pass  # already set by app.py
 
-st.set_page_config(
-    page_title="BESS Tolling Value Backtester",
-    page_icon="🔋",
-    layout="wide",
-)
-
-RAW = Path(__file__).parent.parent.parent / "data" / "raw"
+PROCESSED = Path(__file__).parent.parent.parent / "data" / "processed"
 
 
 # ---------------------------------------------------------------------------
-# Data loading (mirrors dashboard.py loaders)
+# Data loading
 # ---------------------------------------------------------------------------
-
-def _concat_csvs(paths: list, parse_dates: list, dedup_cols: list) -> pd.DataFrame:
-    if not paths:
-        return pd.DataFrame()
-    frames = [pd.read_csv(p, parse_dates=parse_dates) for p in paths]
-    merged = pd.concat(frames, ignore_index=True)
-    if dedup_cols and all(c in merged.columns for c in dedup_cols):
-        merged = merged.drop_duplicates(subset=dedup_cols)
-    return merged
-
 
 @st.cache_data
 def load_auctions() -> pd.DataFrame:
-    legacy = sorted(RAW.glob("auction_results_*.csv"))
-    eac    = sorted(RAW.glob("eac_results_*.csv"))
-    df = _concat_csvs(
-        legacy + eac,
-        parse_dates=["EFA Date", "Delivery Start", "Delivery End"],
-        dedup_cols=["Service", "EFA Date", "EFA"],
-    )
-    return df.sort_values("EFA Date").reset_index(drop=True) if not df.empty else df
+    p = PROCESSED / "auctions.parquet"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p)
 
 
 @st.cache_data
 def load_market_index() -> pd.DataFrame:
-    return _concat_csvs(
-        sorted(RAW.glob("market_index_*.csv")),
-        parse_dates=["settlementDate", "startTime"],
-        dedup_cols=["settlementDate", "settlementPeriod", "dataProvider"],
-    )
+    p = PROCESSED / "market_index.parquet"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p)
 
 
-auctions   = load_auctions()
-mkt_index  = load_market_index()
+auctions  = load_auctions()
+mkt_index = load_market_index()
 
 # ---------------------------------------------------------------------------
 # Sidebar — parameters
@@ -167,7 +153,7 @@ battery = BatterySpec(
 mi_input = mkt_index if include_imbalance else pd.DataFrame()
 
 if auctions.empty:
-    st.error("No auction data found. Run the data collector first.")
+    st.error("No auction data found. Run scripts/prepare_data.py first.")
     st.stop()
 
 result  = run_backtest(auctions, mi_input, battery, selected_services, start_date, end_date)

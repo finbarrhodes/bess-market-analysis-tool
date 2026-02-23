@@ -48,13 +48,16 @@ data/raw/*.json
 data/raw/*.parquet
 data/processed/*.csv
 data/processed/*.json
-data/processed/*.parquet
 data/raw/*.pkl
 data/processed/*.pkl
 
 # Keep directory structure
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+
+# Processed Parquet files ARE committed — pre-aggregated and small (~1.5 MB total).
+# Required for Streamlit Community Cloud (no access to local raw CSVs at runtime).
+!data/processed/*.parquet
 
 # Reports
 reports/*.html

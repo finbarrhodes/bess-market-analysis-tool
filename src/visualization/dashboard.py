@@ -1,7 +1,8 @@
 """
 GB BESS Market Dashboard
 
-Run with:
+Launched as a page via app.py (st.navigation).
+Can still be run standalone for local development:
     streamlit run src/visualization/dashboard.py
 """
 
@@ -12,107 +13,65 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pathlib import Path
 
-# Page config
-st.set_page_config(
-    page_title="GB BESS Market Dashboard",
-    page_icon="\u26a1",
-    layout="wide",
-)
+# ---------------------------------------------------------------------------
+# Standalone guard — set_page_config only when run directly, not via app.py
+# ---------------------------------------------------------------------------
+try:
+    st.set_page_config(
+        page_title="GB BESS Market Dashboard",
+        page_icon="⚡",
+        layout="wide",
+    )
+except st.errors.StreamlitAPIException:
+    pass  # already set by app.py
 
-RAW = Path(__file__).parent.parent.parent / "data" / "raw"
-
-FUEL_GROUP_MAP = {
-    "CCGT":    "Gas",
-    "OCGT":    "Gas",
-    "NUCLEAR": "Nuclear",
-    "WIND":    "Wind",
-    "NPSHYD":  "Hydro",
-    "BIOMASS": "Biomass",
-    "COAL":    "Coal",
-    "OIL":     "Oil",
-    "PS":      "Pumped Storage",
-    "INTFR":   "Interconnectors",
-    "INTIRL":  "Interconnectors",
-    "INTNED":  "Interconnectors",
-    "INTNEM":  "Interconnectors",
-    "INTNSL":  "Interconnectors",
-    "INTVKL":  "Interconnectors",
-    "INTIFA2": "Interconnectors",
-    "INTEW":   "Interconnectors",
-    "INTELEC": "Interconnectors",
-    "OTHER":   "Other",
-}
+PROCESSED = Path(__file__).parent.parent.parent / "data" / "processed"
 
 
-# Data loading (cached, glob-based — picks up any files in data/raw/)
-
-def _concat_csvs(paths: list, parse_dates: list, dedup_cols: list) -> pd.DataFrame:
-    """Load and merge a list of CSV files, deduplicating on key columns."""
-    if not paths:
-        return pd.DataFrame()
-    frames = [pd.read_csv(p, parse_dates=parse_dates) for p in paths]
-    merged = pd.concat(frames, ignore_index=True)
-    if dedup_cols and all(c in merged.columns for c in dedup_cols):
-        merged = merged.drop_duplicates(subset=dedup_cols)
-    return merged
-
+# ---------------------------------------------------------------------------
+# Data loading (cached, reads pre-processed Parquet files)
+# ---------------------------------------------------------------------------
 
 @st.cache_data
 def load_auctions() -> pd.DataFrame:
-    """
-    Merge legacy auction_results_*.csv (Sep 2021 – Nov 2023) with
-    eac_results_*.csv (Nov 2023 – present) into a single DataFrame.
-    Both share the same column schema so they concatenate directly.
-    """
-    legacy_paths = sorted(RAW.glob("auction_results_*.csv"))
-    eac_paths    = sorted(RAW.glob("eac_results_*.csv"))
-    all_paths    = legacy_paths + eac_paths
-    if not all_paths:
+    p = PROCESSED / "auctions.parquet"
+    if not p.exists():
         return pd.DataFrame()
-    df = _concat_csvs(
-        all_paths,
-        parse_dates=["EFA Date", "Delivery Start", "Delivery End"],
-        dedup_cols=["Service", "EFA Date", "EFA"],
-    )
-    return df.sort_values("EFA Date").reset_index(drop=True)
+    return pd.read_parquet(p)
 
 
 @st.cache_data
 def load_system_prices() -> pd.DataFrame:
-    paths = sorted(RAW.glob("system_prices_*.csv"))
-    return _concat_csvs(
-        paths,
-        parse_dates=["settlementDate", "startTime"],
-        dedup_cols=["settlementDate", "settlementPeriod"],
-    )
+    p = PROCESSED / "system_prices.parquet"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p)
 
 
 @st.cache_data
 def load_market_index() -> pd.DataFrame:
-    paths = sorted(RAW.glob("market_index_*.csv"))
-    return _concat_csvs(
-        paths,
-        parse_dates=["settlementDate", "startTime"],
-        dedup_cols=["settlementDate", "settlementPeriod"],
-    )
+    p = PROCESSED / "market_index.parquet"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p)
 
 
 @st.cache_data
 def load_generation() -> pd.DataFrame:
-    paths = sorted(RAW.glob("generation_by_fuel_*.csv"))
-    return _concat_csvs(
-        paths,
-        parse_dates=["settlementDate", "startTime", "publishTime"],
-        dedup_cols=["settlementDate", "settlementPeriod", "fuelType"],
-    )
+    """
+    Returns daily generation totals by fuel group.
+    Pre-aggregated by scripts/prepare_data.py — columns: settlementDate, fuelGroup, generation.
+    """
+    p = PROCESSED / "generation_daily.parquet"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p)
 
 
 auctions   = load_auctions()
 sys_prices = load_system_prices()
 mkt_index  = load_market_index()
-gen_fuel   = load_generation()
-if not gen_fuel.empty:
-    gen_fuel["fuelGroup"] = gen_fuel["fuelType"].map(FUEL_GROUP_MAP).fillna("Other")
+gen_fuel   = load_generation()  # already has fuelGroup column
 
 # Sidebar filters
 st.sidebar.title("Filters")
@@ -161,7 +120,7 @@ tab_auction, tab_spread, tab_system, tab_gen, tab_cross = st.tabs(
 # Tab 1: Auctions
 with tab_auction:
     if auction_filtered.empty:
-        st.warning("No auction data loaded. Run the data collector first.")
+        st.warning("No auction data loaded. Run scripts/prepare_data.py first.")
     else:
         st.subheader("Clearing Prices Over Time")
         fig = px.line(
@@ -220,7 +179,7 @@ with tab_auction:
 # Tab 2: H vs L Spread
 with tab_spread:
     if auctions.empty:
-        st.warning("No auction data loaded. Run the data collector first.")
+        st.warning("No auction data loaded. Run scripts/prepare_data.py first.")
     else:
         st.markdown(
             """
@@ -430,18 +389,13 @@ with tab_system:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-# Tab 3: Generation Mix
+# Tab 4: Generation Mix
 with tab_gen:
     if gen_fuel.empty:
         st.warning("No generation data loaded.")
     else:
         st.subheader("Daily Generation by Fuel Group")
-        daily_gen = (
-            gen_fuel.groupby(["settlementDate", "fuelGroup"])["generation"]
-            .sum()
-            .reset_index()
-        )
-        gen_pivot = daily_gen.pivot_table(
+        gen_pivot = gen_fuel.pivot_table(
             index="settlementDate",
             columns="fuelGroup",
             values="generation",
@@ -472,7 +426,7 @@ with tab_gen:
         fig.update_layout(height=450)
         st.plotly_chart(fig, use_container_width=True)
 
-# Tab 4: Cross-source
+# Tab 5: Cross-source
 with tab_cross:
     if sys_prices.empty or auctions.empty:
         st.warning("Need both system price and auction data for cross-source analysis.")
