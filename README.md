@@ -1,6 +1,8 @@
 # UK BESS Market Analysis & Forecasting Tool
 
-The goals for this project is the following: A Python toolkit for analyzing the UK's Battery Energy Storage System (BESS) markets, including historical trend analysis, price forecasting, and market insights. This repo contains data acquisition tools for NESO and Elexon data as well as dashboard visualization using Streamlit. This project serves as a personal endeavor to learn more about and uncover insights into the UK BESS landscape; some of what is outlined below has yet to be implemented/shipped; more to come!
+[![Live Demo](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://uk-bess-exploration.streamlit.app)
+
+A Python toolkit for analyzing the UK's Battery Energy Storage System (BESS) markets, including historical trend analysis, price forecasting, and market insights. This repo contains data acquisition tools for NESO and Elexon data as well as dashboard visualization using Streamlit. This project serves as a personal endeavor to learn more about and uncover insights into the UK BESS landscape; some of what is outlined below has yet to be implemented/shipped; more to come!
 
 ## Project Overview
 
@@ -114,10 +116,12 @@ python src/forecasting/train_models.py
 
 ### 4. Launch Dashboard
 
-Start the interactive Streamlit dashboard:
+Start the interactive Streamlit app (market dashboard + revenue backtester):
 ```bash
-streamlit run src/visualization/dashboard.py
+streamlit run app.py
 ```
+
+Or visit the live deployment: [uk-bess-exploration.streamlit.app](https://uk-bess-exploration.streamlit.app)
 
 ## Key Markets Analyzed
 
