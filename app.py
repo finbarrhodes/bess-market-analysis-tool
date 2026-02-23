@@ -14,14 +14,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 import streamlit as st
 
 st.set_page_config(
-    page_title="GB BESS Market Analysis",
+    page_title="UK BESS Market Analysis",
     page_icon="⚡",
     layout="wide",
 )
 
 pages = [
-    st.Page("src/visualization/dashboard.py",  title="Market Dashboard",    icon="⚡"),
-    st.Page("src/visualization/backtester.py", title="Revenue Backtester",  icon="🔋"),
+    st.Page("src/visualization/dashboard.py",  title="Market Dashboard"),
+    st.Page("src/visualization/backtester.py", title="Revenue Backtester"),
 ]
 
 pg = st.navigation(pages)
