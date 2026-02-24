@@ -115,6 +115,42 @@ else:
 st.title("GB BESS Market Dashboard")
 st.markdown("Data from the **Elexon Insights Solution API** and **NESO Data Portal**.")
 
+# Context expander
+with st.expander("About this dashboard — BESS revenue routes & market context"):
+    st.markdown(
+        """
+        Battery Energy Storage Systems (BESS) do not rely on a single revenue source — they
+        **stack** income from multiple markets, often simultaneously:
+
+        | Revenue route | How it works |
+        |---|---|
+        | **Frequency response** (Dynamic Services) | Paid a £/MW/h availability fee to hold discharge or charge headroom; activated automatically when grid frequency deviates from 50 Hz |
+        | **Wholesale arbitrage** | Charge during low-price periods (high wind, low demand); discharge during high-price periods |
+        | **Balancing Mechanism (BM)** | Dispatched by NESO in real time as a BM unit to correct short-term supply/demand imbalance |
+        | **Capacity Market** | Annual availability payment for committing to generate during periods of system stress |
+
+        **Why this dashboard focuses on Dynamic Services and wholesale prices:**
+        Dynamic services (DC, DM, DR) dominated the GB BESS revenue stack from roughly 2021 through
+        early 2023 — at times accounting for over 70% of total asset revenue, with some assets
+        earning ~£156k/MW/year at the 2022 peak
+        ([Modo Energy](https://modoenergy.com/research/future-of-battery-energy-storage-buildout-in-great-britain);
+        [Timera Energy](https://timera-energy.com/blog/battery-investors-confront-revenue-shift-in-2023/)).
+        From late 2022, a rapid influx of new BESS capacity saturated the frequency response
+        markets and revenues compressed sharply — a trend visible in the clearing price charts below.
+        Dynamic services remain a core stack component, but arbitrage and Capacity Market income
+        have grown in relative importance since.
+
+        **BESS is not the only participant in these markets.** Pumped-storage hydro (e.g. Dinorwig,
+        Cruachan) has provided fast frequency response for decades. Demand-side response and some
+        gas peakers also qualify, particularly for the slower DR service. However, BESS's
+        sub-second response capability has made it the dominant and marginal price-setting
+        technology in DC and DM auctions.
+
+        The **Revenue Backtester** page models the combined arbitrage + frequency response revenue
+        stack for a configurable asset.
+        """
+    )
+
 # Top-level metrics
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Auction Records", f"{len(auction_filtered):,}")
