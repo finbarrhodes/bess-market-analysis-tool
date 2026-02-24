@@ -124,7 +124,7 @@ col4.metric("Generation Records", f"{len(gen_fuel):,}")
 
 # Tab layout
 tab_auction, tab_spread, tab_system, tab_gen, tab_cross = st.tabs(
-    ["DC/DR/DM Auctions", "H vs L Spread", "System Prices", "Generation Mix", "System Price vs DC High"]
+    ["Dynamic Services", "H vs L Spread", "System Prices", "Generation Mix", "System Price vs DC High"]
 )
 
 # ---------------------------------------------------------------------------
@@ -136,9 +136,9 @@ with tab_auction:
     else:
         st.markdown(
             """
-            GB frequency response is procured through three **dynamic** services, each split into
-            **High** (discharge — activated when frequency falls below 50 Hz) and **Low** (charge —
-            activated when frequency rises above 50 Hz) auctions:
+            GB frequency response is procured through three [**dynamic** services](https://www.neso.energy/industry-information/balancing-services/frequency-response-services/dynamic-services-dcdmdr),
+            each split into **High** (discharge — activated when frequency falls below 50 Hz) and
+            **Low** (charge — activated when frequency rises above 50 Hz) auctions:
 
             | Service | Frequency band | Role |
             |---------|---------------|------|
