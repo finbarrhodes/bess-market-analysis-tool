@@ -99,6 +99,7 @@ def calc_ancillary_revenue(
     start_date=None,
     end_date=None,
     min_price: float = 0.0,
+    fr_mw: float = None,
 ) -> pd.DataFrame:
     """
     Monthly availability revenue from frequency response auctions.
@@ -108,19 +109,29 @@ def calc_ancillary_revenue(
     floor and opts out of any EFA block clearing below that threshold — a
     rational strategy any real participant would adopt.
 
+    Parameters
+    ----------
+    fr_mw : float, optional
+        MW committed to FR availability. Defaults to battery.power_mw.
+        Use this to model a partial FR commitment where some capacity is
+        reserved for energy arbitrage instead.
+
     Returns
     -------
     DataFrame with columns: [month (Period), service (str), revenue_gbp (float)]
     """
+    if fr_mw is None:
+        fr_mw = battery.power_mw
+
     df = _filter_dates(auctions.copy(), "EFA Date", start_date, end_date)
     df = df[df["Service"].isin(services)]
     df = df[df["Clearing Price"] >= min_price]
 
-    if df.empty:
+    if df.empty or fr_mw == 0:
         return pd.DataFrame(columns=["month", "service", "revenue_gbp"])
 
     df = df.copy()
-    df["revenue_gbp"] = df["Clearing Price"] * battery.power_mw * EFA_HOURS
+    df["revenue_gbp"] = df["Clearing Price"] * fr_mw * EFA_HOURS
     df["month"] = df["EFA Date"].dt.to_period("M")
 
     return (
@@ -140,6 +151,8 @@ def calc_imbalance_revenue(
     battery: BatterySpec,
     start_date=None,
     end_date=None,
+    arb_mw: float = None,
+    arb_energy_mwh: float = None,
 ) -> pd.DataFrame:
     """
     Monthly wholesale energy arbitrage revenue using a daily intrinsic model.
@@ -157,13 +170,27 @@ def calc_imbalance_revenue(
       - Deduct cycling wear cost = cycling_cost_per_mwh × energy_out
       - Only execute the cycle if gross profit > cycling wear cost
 
+    Parameters
+    ----------
+    arb_mw : float, optional
+        MW available for arbitrage. Defaults to battery.power_mw.
+        Set to battery.power_mw - fr_mw when using a capacity split.
+    arb_energy_mwh : float, optional
+        Usable energy (MWh) available for arbitrage. Defaults to battery.energy_mwh.
+        Set to arb_mw × battery.duration_h when using a capacity split.
+
     Returns
     -------
     DataFrame with columns: [month (Period), imbalance_revenue_gbp (float), cycling_cost_gbp (float)]
     Where imbalance_revenue_gbp is the GROSS arbitrage profit (before deducting cycling wear),
     so that the wear cost can be shown as a separate bar in the stacked chart.
     """
-    if market_index.empty:
+    if arb_mw is None:
+        arb_mw = battery.power_mw
+    if arb_energy_mwh is None:
+        arb_energy_mwh = battery.energy_mwh
+
+    if market_index.empty or arb_mw == 0 or arb_energy_mwh == 0:
         return pd.DataFrame(columns=["month", "imbalance_revenue_gbp", "cycling_cost_gbp"])
 
     # Filter to APXMIDP only — the reliable GB spot price reference
@@ -174,8 +201,8 @@ def calc_imbalance_revenue(
         return pd.DataFrame(columns=["month", "imbalance_revenue_gbp", "cycling_cost_gbp"])
 
     n_periods = max(1, int(battery.duration_h * 2))
-    energy_out = battery.energy_mwh
-    energy_in  = battery.energy_mwh / battery.efficiency_rt  # MWh purchased to store energy_out
+    energy_out = arb_energy_mwh
+    energy_in  = arb_energy_mwh / battery.efficiency_rt  # MWh purchased to store energy_out
 
     rows = []
     for date, day_df in df.groupby("settlementDate"):
@@ -222,6 +249,7 @@ def run_backtest(
     services: list = None,
     start_date=None,
     end_date=None,
+    fr_mw: float = None,
 ) -> dict:
     """
     Run the full revenue stack backtest.
@@ -235,6 +263,10 @@ def run_backtest(
     services      : list of service codes to include (default: all six)
     start_date    : inclusive start date (str or datetime)
     end_date      : inclusive end date (str or datetime)
+    fr_mw         : float, optional
+        MW committed to FR availability services. The remainder (battery.power_mw - fr_mw)
+        is available for energy arbitrage. Defaults to battery.power_mw (full FR commitment,
+        no arbitrage capacity split — same as the original single-stream model).
 
     Returns
     -------
@@ -245,8 +277,15 @@ def run_backtest(
     if services is None:
         services = ALL_SERVICES
 
+    # Resolve FR/arbitrage split
+    if fr_mw is None:
+        fr_mw = battery.power_mw
+    fr_mw = float(np.clip(fr_mw, 0, battery.power_mw))
+    arb_mw = battery.power_mw - fr_mw
+    arb_energy_mwh = arb_mw * battery.duration_h
+
     # --- Ancillary ---
-    anc = calc_ancillary_revenue(auctions, battery, services, start_date, end_date)
+    anc = calc_ancillary_revenue(auctions, battery, services, start_date, end_date, fr_mw=fr_mw)
     if not anc.empty:
         anc_wide = anc.pivot_table(
             index="month", columns="service", values="revenue_gbp", fill_value=0
@@ -256,7 +295,10 @@ def run_backtest(
         anc_wide = pd.DataFrame()
 
     # --- Arbitrage ---
-    imb = calc_imbalance_revenue(market_index, battery, start_date, end_date)
+    imb = calc_imbalance_revenue(
+        market_index, battery, start_date, end_date,
+        arb_mw=arb_mw, arb_energy_mwh=arb_energy_mwh,
+    )
     if not imb.empty:
         imb_wide = imb.set_index("month")
     else:
@@ -301,6 +343,8 @@ def run_backtest(
         "annualised_per_mw":  round(net_total / years / battery.power_mw, 0) if years > 0 and battery.power_mw > 0 else 0,
         "breakdown":          breakdown,
         "top_service":        max(breakdown, key=breakdown.get) if breakdown else "N/A",
+        "fr_mw":              fr_mw,
+        "arb_mw":             arb_mw,
     }
 
     return {"monthly": monthly, "summary": summary}
@@ -317,10 +361,18 @@ def sensitivity_table(
     power_range: list = None,
     start_date=None,
     end_date=None,
+    fr_fraction: float = 1.0,
 ) -> pd.DataFrame:
     """
     Run the backtest across a range of battery sizes, holding other parameters fixed.
     Returns a DataFrame suitable for display as a summary table.
+
+    Parameters
+    ----------
+    fr_fraction : float
+        FR commitment as a fraction of power_mw (0.0–1.0). Scales with each
+        test power level so the participation split is consistent across the table.
+        Default 1.0 = full FR commitment (original behaviour).
     """
     if power_range is None:
         power_range = [10, 25, 50, 100, 200]
@@ -333,7 +385,12 @@ def sensitivity_table(
             efficiency_rt=base_spec.efficiency_rt,
             cycling_cost_per_mwh=base_spec.cycling_cost_per_mwh,
         )
-        result = run_backtest(auctions, market_index, spec, start_date=start_date, end_date=end_date)
+        fr_mw_for_spec = fr_fraction * mw
+        result = run_backtest(
+            auctions, market_index, spec,
+            start_date=start_date, end_date=end_date,
+            fr_mw=fr_mw_for_spec,
+        )
         s = result["summary"]
         rows.append({
             "Power (MW)":              mw,
@@ -344,3 +401,65 @@ def sensitivity_table(
         })
 
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Optimal FR/arbitrage split finder
+# ---------------------------------------------------------------------------
+
+def find_optimal_split(
+    auctions: pd.DataFrame,
+    market_index: pd.DataFrame,
+    battery: BatterySpec,
+    services: list = None,
+    start_date=None,
+    end_date=None,
+    n_steps: int = 40,
+) -> tuple:
+    """
+    Sweep fr_mw from 0 to battery.power_mw across n_steps evenly-spaced values
+    and return the revenue-maximising split alongside the full trade-off curve.
+
+    Parameters
+    ----------
+    n_steps : int
+        Number of fr_mw values to evaluate (default 40). More steps give a
+        smoother curve but take proportionally longer to compute.
+
+    Returns
+    -------
+    (optimal_fr_mw, trade_off_df) where:
+      optimal_fr_mw  : float — fr_mw that maximises total net revenue
+      trade_off_df   : DataFrame with columns [fr_mw, arb_mw, total_net_gbp, annualised_per_mw]
+    """
+    if services is None:
+        services = ALL_SERVICES
+
+    step = battery.power_mw / n_steps
+    fr_values = np.arange(0, battery.power_mw + step * 0.5, step)
+    fr_values = np.clip(fr_values, 0, battery.power_mw)
+
+    rows = []
+    for fr in fr_values:
+        result = run_backtest(
+            auctions, market_index, battery, services,
+            start_date=start_date, end_date=end_date,
+            fr_mw=fr,
+        )
+        s = result["summary"]
+        rows.append({
+            "fr_mw":             round(fr, 2),
+            "arb_mw":            round(battery.power_mw - fr, 2),
+            "total_net_gbp":     s.get("total_net", 0),
+            "annualised_per_mw": s.get("annualised_per_mw", 0),
+        })
+
+    trade_off_df = pd.DataFrame(rows)
+
+    if trade_off_df.empty:
+        return battery.power_mw, trade_off_df
+
+    best_idx = trade_off_df["total_net_gbp"].idxmax()
+    optimal_fr_mw = float(trade_off_df.loc[best_idx, "fr_mw"])
+
+    return optimal_fr_mw, trade_off_df

@@ -21,6 +21,7 @@ from src.analysis.revenue_stack import (
     BatterySpec,
     run_backtest,
     sensitivity_table,
+    find_optimal_split,
     ALL_SERVICES,
     SERVICE_LABELS,
     SERVICE_COLOURS,
@@ -105,6 +106,31 @@ availability_pct = st.sidebar.slider(
 )
 
 st.sidebar.divider()
+st.sidebar.subheader("Market Participation")
+
+fr_mw = st.sidebar.slider(
+    "MW committed to FR availability",
+    min_value=0,
+    max_value=power_mw,
+    value=power_mw,
+    step=1,
+    help=(
+        "Capacity committed to frequency response (FR) availability services. "
+        "The remaining MW is available for energy arbitrage. "
+        "FR-committed units hold their SoC position for frequency response "
+        "and cannot simultaneously trade energy."
+    ),
+)
+arb_mw = power_mw - fr_mw
+
+if fr_mw == power_mw:
+    st.sidebar.caption("→ All capacity committed to FR; no arbitrage.")
+elif fr_mw == 0:
+    st.sidebar.caption("→ No FR commitment; all capacity for arbitrage.")
+else:
+    st.sidebar.caption(f"→ {fr_mw} MW → FR availability | {arb_mw} MW → arbitrage")
+
+st.sidebar.divider()
 st.sidebar.subheader("Services to Include")
 
 selected_services = st.sidebar.multiselect(
@@ -156,7 +182,42 @@ if auctions.empty:
     st.error("No auction data found. Run scripts/prepare_data.py first.")
     st.stop()
 
-result  = run_backtest(auctions, mi_input, battery, selected_services, start_date, end_date)
+# Compute optimal split (cached — reruns only when parameters change)
+@st.cache_data
+def _cached_optimal_split(
+    power_mw, duration_h, efficiency_rt, cycling_cost_per_mwh, availability_factor,
+    services_key, start_date, end_date,
+):
+    """Thin cache wrapper for find_optimal_split (hashable args only)."""
+    _battery = BatterySpec(
+        power_mw=power_mw,
+        duration_h=duration_h,
+        efficiency_rt=efficiency_rt,
+        cycling_cost_per_mwh=cycling_cost_per_mwh,
+        availability_factor=availability_factor,
+    )
+    _mi = load_market_index() if include_imbalance else pd.DataFrame()
+    return find_optimal_split(
+        load_auctions(), _mi, _battery,
+        services=list(services_key),
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+optimal_fr_mw, trade_off_df = _cached_optimal_split(
+    power_mw, duration_h, efficiency_pct / 100, cycling_cost, availability_pct / 100,
+    tuple(sorted(selected_services)), start_date, end_date,
+)
+
+# Show optimal marker below the FR slider
+st.sidebar.caption(
+    f"ℹ Optimal split: **{optimal_fr_mw:.0f} MW** to FR "
+    f"(maximises net revenue at current parameters)"
+)
+
+result  = run_backtest(
+    auctions, mi_input, battery, selected_services, start_date, end_date, fr_mw=fr_mw
+)
 monthly = result["monthly"]
 summary = result["summary"]
 
@@ -176,7 +237,7 @@ st.markdown(
 # ---------------------------------------------------------------------------
 
 if summary:
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric(
         "Total Net Revenue",
         f"£{summary['total_net'] / 1_000:,.0f}k",
@@ -192,6 +253,10 @@ if summary:
     c4.metric(
         "Top Revenue Stream",
         SERVICE_LABELS.get(summary.get("top_service", ""), summary.get("top_service", "N/A")),
+    )
+    c5.metric(
+        "Capacity Split",
+        f"{fr_mw} MW FR / {arb_mw} MW arb",
     )
 else:
     st.warning("No results — check that services are selected and data covers the chosen period.")
@@ -248,7 +313,61 @@ if not monthly.empty:
     st.plotly_chart(fig, use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Charts 2a + 2b: Cumulative revenue | Revenue breakdown pie
+# Chart 2: FR / Arbitrage trade-off curve
+# ---------------------------------------------------------------------------
+
+if not trade_off_df.empty and power_mw > 1:
+    with st.expander("FR / Arbitrage trade-off curve", expanded=True):
+        st.caption(
+            "Total net revenue across the backtest period as a function of how much "
+            "capacity is committed to FR availability vs energy arbitrage. "
+            "The green marker shows the revenue-maximising split at current parameters."
+        )
+
+        fig_tradeoff = go.Figure()
+
+        # Main curve
+        fig_tradeoff.add_trace(go.Scatter(
+            x=trade_off_df["fr_mw"],
+            y=trade_off_df["total_net_gbp"] / 1_000,
+            mode="lines",
+            name="Total net revenue",
+            line=dict(color="#1f77b4", width=2.5),
+        ))
+
+        # Current slider position (vertical dashed line)
+        fig_tradeoff.add_vline(
+            x=fr_mw,
+            line_dash="dash",
+            line_color="#d62728",
+            annotation_text=f"Current: {fr_mw} MW",
+            annotation_position="top right",
+            annotation_font_color="#d62728",
+        )
+
+        # Optimal point (green star marker)
+        optimal_row = trade_off_df.loc[trade_off_df["fr_mw"] == optimal_fr_mw]
+        if not optimal_row.empty:
+            fig_tradeoff.add_trace(go.Scatter(
+                x=optimal_row["fr_mw"],
+                y=optimal_row["total_net_gbp"] / 1_000,
+                mode="markers",
+                name=f"Optimal: {optimal_fr_mw:.0f} MW to FR",
+                marker=dict(symbol="star", size=14, color="#2ca02c"),
+            ))
+
+        fig_tradeoff.update_layout(
+            height=340,
+            template="plotly_white",
+            xaxis_title="MW committed to FR availability",
+            yaxis_title="Total net revenue (£k)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(t=40),
+        )
+        st.plotly_chart(fig_tradeoff, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Charts 3a + 3b: Cumulative revenue | Revenue breakdown pie
 # ---------------------------------------------------------------------------
 
 left, right = st.columns([2, 1])
@@ -309,6 +428,7 @@ sens_df = sensitivity_table(
     power_range=[5, 10, 25, 50, 100, 200],
     start_date=start_date,
     end_date=end_date,
+    fr_fraction=fr_mw / power_mw if power_mw > 0 else 1.0,
 )
 
 st.dataframe(
@@ -329,9 +449,32 @@ st.divider()
 # ---------------------------------------------------------------------------
 
 with st.expander("Methodology & Assumptions"):
+    arb_energy_mwh = arb_mw * duration_h
     st.markdown(f"""
+**Two-stage participation model**
+
+This backtester uses a simplified two-stage model to separate FR availability revenue
+from energy arbitrage revenue without double-counting the same physical capacity:
+
+- **Stage 1 — FR commitment ({fr_mw} MW):** Capacity committed to frequency response
+  holds its state of charge in a headroom band, ready to discharge (High services) or
+  charge (Low services) on demand. These units earn availability payments but do not
+  trade energy in the wholesale market.
+- **Stage 2 — Arbitrage ({arb_mw} MW):** Remaining capacity runs daily intrinsic
+  arbitrage independently, unconstrained by FR headroom requirements.
+
+The trade-off curve above shows how total net revenue varies as the split changes —
+the optimal point represents the revenue-maximising balance between the two strategies
+at current market prices and battery parameters.
+
+*Remaining simplification:* SoC within the FR band is not explicitly simulated at
+half-hourly resolution. A full joint dispatch model (LP/MIP) would track SoC state
+continuously and optimise both stages simultaneously.
+
+---
+
 **Ancillary service availability revenue**
-- Revenue = `clearing_price (£/MW/h) × {power_mw} MW × 4 hours per EFA block`
+- Revenue = `clearing_price (£/MW/h) × {fr_mw} MW committed to FR × 4 hours per EFA block`
 - Services of different response speeds (DC, DR, DM) can be stacked on the same physical MW
   in the GB market — each earns a separate availability payment.
 - High (discharge) and Low (charge) services are modelled as independent and simultaneous,
@@ -340,11 +483,11 @@ with st.expander("Methodology & Assumptions"):
   EAC service Nov 2023–present).
 
 **Wholesale energy arbitrage revenue**
-- One arbitrage cycle per day maximum.
+- One arbitrage cycle per day maximum, using the **{arb_mw} MW** available for arbitrage.
 - Charge in the **{int(duration_h * 2)} cheapest** settlement periods; discharge in the
   **{int(duration_h * 2)} most expensive** periods.
-- Gross profit = `avg_discharge_price × {power_mw * duration_h:.0f} MWh`
-  − `avg_charge_price × {power_mw * duration_h / (efficiency_pct / 100):.1f} MWh`
+- Gross profit = `avg_discharge_price × {arb_energy_mwh:.0f} MWh`
+  − `avg_charge_price × {arb_energy_mwh / (efficiency_pct / 100):.1f} MWh`
   (extra input energy needed to account for {100 - efficiency_pct}% round-trip losses).
 - Cycle only executed on days where gross profit exceeds the cycling wear cost.
 - **Price reference: APXMIDP market index** (APX Power UK) from Elexon Insights
@@ -373,10 +516,5 @@ with st.expander("Methodology & Assumptions"):
 - Balancing Mechanism (BM) direct trading
 - Battery degradation over the backtest period
 - Real-time dispatch constraints or grid connection limits
-- **SoC interaction between FR services and energy arbitrage**: whether the battery can
-  participate in arbitrage at any given moment depends continuously on its current state
-  of charge, which is itself the product of all prior dispatch decisions across every
-  active market. This is a joint optimisation problem — not reducible to a simple
-  headroom cap — and is the primary motivation for the LP/MIP dispatch optimiser
-  planned as the next analytical module.
+- Half-hourly SoC simulation within the FR headroom band (planned for a future LP/MIP module)
     """)
