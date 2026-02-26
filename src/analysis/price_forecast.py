@@ -1,0 +1,538 @@
+"""
+Price Forecast & Forecast-Driven Dispatch
+==========================================
+Implements three dispatch strategies for the BESS revenue backtester:
+
+  1. Perfect Foresight — actual day-D prices fed to the optimizer (revenue ceiling).
+     Already handled by revenue_stack.py; not repeated here.
+
+  2. Naive baseline — uses actual day D-1 prices as the forecast for day D.
+     No ML required; sets the "zero skill" floor.
+
+  3. ML model — trains a Random Forest or XGBoost regressor on features available
+     at end of day D-1 (lagged prices, generation mix, cyclical temporal encodings)
+     with a strict temporal train/test split.
+
+All three strategies share the same dispatch logic: given a price forecast for day D,
+pick the N cheapest periods to charge and N most expensive to discharge; then realise
+revenue against the actual day-D prices.
+
+New module kept separate from revenue_stack.py so the perfect-foresight backtester
+remains a clean, standalone baseline.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Default temporal split: everything before this date is training data.
+# ~20 months train (Jul 2023–Feb 2025), ~12 months test (Mar 2025–Feb 2026).
+DEFAULT_TEST_START = "2025-03-01"
+
+
+# ---------------------------------------------------------------------------
+# Feature engineering
+# ---------------------------------------------------------------------------
+
+def build_feature_matrix(
+    market_index: pd.DataFrame,
+    generation_daily: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Construct a feature matrix for price forecasting.
+
+    Each row represents one (settlementDate, settlementPeriod) observation.
+    Target column ``apx_price`` is the APXMIDP price for that period.
+    All feature columns use only information available at the end of day D-1,
+    ensuring no look-ahead bias when training or backtesting.
+
+    Parameters
+    ----------
+    market_index : DataFrame
+        From data/processed/market_index.parquet. Must contain columns:
+        settlementDate, settlementPeriod, dataProvider, price.
+    generation_daily : DataFrame
+        From data/processed/generation_daily.parquet. Must contain columns:
+        settlementDate, fuelGroup, generation.
+
+    Returns
+    -------
+    DataFrame with columns:
+        settlementDate, settlementPeriod, apx_price  (target),
+        + feature columns described below.
+    Rows with NaN features (due to lag/rolling windows at the start of the
+    series) are dropped.
+    """
+    # --- Base: APXMIDP prices only ---
+    apx = (
+        market_index[market_index["dataProvider"] == "APXMIDP"]
+        [["settlementDate", "settlementPeriod", "price"]]
+        .copy()
+        .rename(columns={"price": "apx_price"})
+    )
+    apx["settlementDate"] = pd.to_datetime(apx["settlementDate"]).dt.normalize()
+    apx = apx.sort_values(["settlementDate", "settlementPeriod"]).reset_index(drop=True)
+
+    # --- Same-period lagged prices ---
+    # Shift by D days within each settlement period group so that day D's feature
+    # is the price at that exact same period D days ago.
+    apx = apx.sort_values(["settlementPeriod", "settlementDate"])
+    for lag_days in [1, 2, 7]:
+        apx[f"apx_lag_{lag_days}d"] = (
+            apx.groupby("settlementPeriod")["apx_price"]
+            .shift(lag_days)
+        )
+
+    # --- Previous-day aggregate statistics ---
+    # For day D, we want stats computed from all 48 periods of day D-1.
+    daily_stats = (
+        apx.groupby("settlementDate")["apx_price"]
+        .agg(daily_mean="mean", daily_std="std", daily_max="max", daily_min="min")
+        .reset_index()
+    )
+    # Shift by 1 day so day D gets D-1's stats
+    daily_stats_lag = daily_stats.copy()
+    daily_stats_lag["settlementDate"] = daily_stats_lag["settlementDate"] + pd.Timedelta(days=1)
+    daily_stats_lag = daily_stats_lag.rename(columns={
+        "daily_mean": "prev_day_mean",
+        "daily_std":  "prev_day_std",
+        "daily_max":  "prev_day_max",
+        "daily_min":  "prev_day_min",
+    })
+    apx = apx.merge(daily_stats_lag, on="settlementDate", how="left")
+
+    # --- Generation mix features (daily, from day D-1) ---
+    gen = generation_daily.copy()
+    gen["settlementDate"] = pd.to_datetime(gen["settlementDate"]).dt.normalize()
+
+    # Pivot fuel groups into columns
+    gen_wide = gen.pivot_table(
+        index="settlementDate",
+        columns="fuelGroup",
+        values="generation",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+    gen_wide.columns.name = None
+    # Normalise column names
+    gen_wide.columns = [
+        "settlementDate" if c == "settlementDate"
+        else f"gen_{c.lower().replace(' ', '_')}"
+        for c in gen_wide.columns
+    ]
+
+    # Derived generation features
+    renewable_cols = [c for c in gen_wide.columns if any(
+        fuel in c for fuel in ["wind", "hydro", "biomass", "solar"]
+    )]
+    fossil_cols = [c for c in gen_wide.columns if any(
+        fuel in c for fuel in ["gas", "coal", "oil"]
+    )]
+    all_gen_cols = [c for c in gen_wide.columns if c.startswith("gen_")]
+    gen_wide["gen_total"] = gen_wide[all_gen_cols].sum(axis=1)
+    gen_wide["gen_renewable_frac"] = (
+        gen_wide[[c for c in renewable_cols if c in gen_wide.columns]].sum(axis=1)
+        / gen_wide["gen_total"].replace(0, np.nan)
+    )
+    gen_wide["gen_fossil_frac"] = (
+        gen_wide[[c for c in fossil_cols if c in gen_wide.columns]].sum(axis=1)
+        / gen_wide["gen_total"].replace(0, np.nan)
+    )
+
+    # Shift generation by 1 day: day D gets D-1 generation (available at end-of-D-1)
+    gen_wide_lag = gen_wide.copy()
+    gen_wide_lag["settlementDate"] = gen_wide_lag["settlementDate"] + pd.Timedelta(days=1)
+
+    apx = apx.merge(gen_wide_lag, on="settlementDate", how="left")
+
+    # --- Cyclical temporal features ---
+    sp = apx["settlementPeriod"]
+    apx["sp_sin"] = np.sin(2 * np.pi * sp / 48)
+    apx["sp_cos"] = np.cos(2 * np.pi * sp / 48)
+
+    dow = apx["settlementDate"].dt.dayofweek  # 0=Mon, 6=Sun
+    apx["dow_sin"] = np.sin(2 * np.pi * dow / 7)
+    apx["dow_cos"] = np.cos(2 * np.pi * dow / 7)
+
+    doy = apx["settlementDate"].dt.dayofyear
+    year_len = apx["settlementDate"].dt.is_leap_year.map({True: 366, False: 365})
+    apx["doy_sin"] = np.sin(2 * np.pi * doy / year_len)
+    apx["doy_cos"] = np.cos(2 * np.pi * doy / year_len)
+
+    apx["is_weekend"] = (dow >= 5).astype(int)
+
+    # --- Drop rows where any lag feature is missing ---
+    lag_cols = [c for c in apx.columns if "lag" in c or "prev_day" in c]
+    apx = apx.dropna(subset=lag_cols).reset_index(drop=True)
+
+    return apx
+
+
+# ---------------------------------------------------------------------------
+# Model training
+# ---------------------------------------------------------------------------
+
+FEATURE_COLS = [
+    # Same-period lags
+    "apx_lag_1d", "apx_lag_2d", "apx_lag_7d",
+    # Previous-day aggregate
+    "prev_day_mean", "prev_day_std", "prev_day_max", "prev_day_min",
+    # Generation mix
+    "gen_total", "gen_renewable_frac", "gen_fossil_frac",
+    # Temporal
+    "sp_sin", "sp_cos",
+    "dow_sin", "dow_cos",
+    "doy_sin", "doy_cos",
+    "is_weekend",
+]
+
+# Include any individual fuel-group columns that were built (gas, wind, etc.)
+# These are appended dynamically in train_forecast_model.
+
+
+def train_forecast_model(
+    feature_df: pd.DataFrame,
+    model_type: str = "rf",
+    test_start: str = DEFAULT_TEST_START,
+) -> tuple:
+    """
+    Train a price forecasting model with a strict temporal train/test split.
+
+    Parameters
+    ----------
+    feature_df  : DataFrame from build_feature_matrix()
+    model_type  : "rf" (Random Forest) or "xgb" (XGBoost)
+    test_start  : ISO date string — all rows on or after this date form the test set
+
+    Returns
+    -------
+    (model, feature_cols, train_metrics, test_metrics) where:
+      model         : fitted sklearn / xgboost estimator
+      feature_cols  : list of column names used as features
+      train_metrics : dict {rmse, mae, n_samples}
+      test_metrics  : dict {rmse, mae, n_samples}
+    """
+    from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+    # Resolve the full feature column list (base + any per-fuel gen columns present)
+    gen_fuel_cols = sorted([
+        c for c in feature_df.columns
+        if c.startswith("gen_") and c not in ("gen_total", "gen_renewable_frac", "gen_fossil_frac")
+    ])
+    feature_cols = FEATURE_COLS + [c for c in gen_fuel_cols if c not in FEATURE_COLS]
+    feature_cols = [c for c in feature_cols if c in feature_df.columns]
+
+    train = feature_df[feature_df["settlementDate"] < pd.Timestamp(test_start)]
+    test  = feature_df[feature_df["settlementDate"] >= pd.Timestamp(test_start)]
+
+    X_train = train[feature_cols].fillna(0)
+    y_train = train["apx_price"]
+    X_test  = test[feature_cols].fillna(0)
+    y_test  = test["apx_price"]
+
+    model = _build_model(model_type)
+    model.fit(X_train, y_train)
+
+    def _metrics(X, y, label):
+        pred = model.predict(X)
+        rmse = float(np.sqrt(mean_squared_error(y, pred)))
+        mae  = float(mean_absolute_error(y, pred))
+        return {"rmse": round(rmse, 2), "mae": round(mae, 2), "n_samples": len(y)}
+
+    train_metrics = _metrics(X_train, y_train, "train")
+    test_metrics  = _metrics(X_test,  y_test,  "test")
+
+    return model, feature_cols, train_metrics, test_metrics
+
+
+def _build_model(model_type: str):
+    if model_type == "rf":
+        from sklearn.ensemble import RandomForestRegressor
+        return RandomForestRegressor(
+            n_estimators=200,
+            max_features="sqrt",
+            min_samples_leaf=5,
+            n_jobs=-1,
+            random_state=42,
+        )
+    elif model_type == "xgb":
+        from xgboost import XGBRegressor
+        return XGBRegressor(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            n_jobs=-1,
+            random_state=42,
+            verbosity=0,
+        )
+    else:
+        raise ValueError(f"Unknown model_type '{model_type}'. Use 'rf' or 'xgb'.")
+
+
+def get_feature_importances(model, feature_cols: list) -> pd.Series:
+    """Return feature importances as a named Series, sorted descending."""
+    return (
+        pd.Series(model.feature_importances_, index=feature_cols)
+        .sort_values(ascending=False)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-day prediction helpers
+# ---------------------------------------------------------------------------
+
+def predict_day_prices(
+    model,
+    feature_cols: list,
+    feature_df: pd.DataFrame,
+    target_date: pd.Timestamp,
+) -> pd.Series:
+    """
+    Predict APXMIDP prices for all 48 settlement periods of target_date.
+
+    Returns a Series indexed by settlementPeriod (1–48).
+    Returns an empty Series if features for that date are unavailable.
+    """
+    day_df = feature_df[feature_df["settlementDate"] == pd.Timestamp(target_date)]
+    if day_df.empty:
+        return pd.Series(dtype=float)
+
+    X = day_df[feature_cols].fillna(0)
+    preds = model.predict(X)
+    return pd.Series(preds, index=day_df["settlementPeriod"].values)
+
+
+def naive_day_prices(
+    market_index: pd.DataFrame,
+    target_date: pd.Timestamp,
+) -> pd.Series:
+    """
+    Naive forecast: return yesterday's APXMIDP prices as the forecast for target_date.
+    Returns a Series indexed by settlementPeriod (1–48).
+    Returns an empty Series if yesterday's data is unavailable.
+    """
+    yesterday = pd.Timestamp(target_date) - pd.Timedelta(days=1)
+    apx = market_index[market_index["dataProvider"] == "APXMIDP"]
+    prev = apx[apx["settlementDate"].dt.normalize() == yesterday]
+    if prev.empty:
+        return pd.Series(dtype=float)
+    return prev.set_index("settlementPeriod")["price"]
+
+
+# ---------------------------------------------------------------------------
+# Forecast-driven dispatch backtester
+# ---------------------------------------------------------------------------
+
+def _dispatch_day(
+    forecast_prices: pd.Series,
+    actual_prices: pd.Series,
+    n_periods: int,
+    energy_out: float,
+    energy_in: float,
+    cycling_cost_per_mwh: float,
+) -> dict | None:
+    """
+    Given a price forecast and actual prices for a single day:
+    - Use forecast to identify which periods to charge / discharge
+    - Realise revenue against actual prices
+
+    Returns a dict {imbalance_revenue_gbp, cycling_cost_gbp, mwh_cycled}
+    or None if the trade is not executed (insufficient data or not profitable).
+    """
+    if len(forecast_prices) < n_periods * 2 or len(actual_prices) < n_periods * 2:
+        return None
+
+    # Use FORECAST to rank periods
+    charge_periods    = forecast_prices.nsmallest(n_periods).index
+    discharge_periods = forecast_prices.nlargest(n_periods).index
+
+    # Realise revenue against ACTUAL prices
+    avg_charge    = actual_prices.reindex(charge_periods).dropna().mean()
+    avg_discharge = actual_prices.reindex(discharge_periods).dropna().mean()
+
+    if pd.isna(avg_charge) or pd.isna(avg_discharge):
+        return None
+
+    gross_profit = avg_discharge * energy_out - avg_charge * energy_in
+    cycling_wear = cycling_cost_per_mwh * energy_out
+
+    # Only execute if forecast-implied schedule is realised-profitable
+    if gross_profit <= cycling_wear:
+        return None
+
+    return {
+        "imbalance_revenue_gbp": gross_profit,
+        "cycling_cost_gbp":      cycling_wear,
+        "mwh_cycled":            energy_out,
+    }
+
+
+def run_forecast_backtest(
+    strategy: str,
+    market_index: pd.DataFrame,
+    auctions: pd.DataFrame,
+    battery,                  # BatterySpec from revenue_stack
+    services: list,
+    start_date,
+    end_date,
+    fr_mw: float = None,
+    model=None,
+    feature_df: pd.DataFrame = None,
+    feature_cols: list = None,
+) -> dict:
+    """
+    Run a forecast-driven revenue backtest for either the 'naive' or 'ml' strategy.
+
+    Ancillary revenue (FR availability) is identical to the perfect-foresight backtest —
+    it does not depend on price forecasting. Only the arbitrage stream changes.
+
+    Parameters
+    ----------
+    strategy     : "naive" or "ml"
+    market_index : DataFrame from load_market_index()
+    auctions     : DataFrame from load_auctions()
+    battery      : BatterySpec instance
+    services     : list of service codes to include
+    start_date   : inclusive backtest start
+    end_date     : inclusive backtest end
+    fr_mw        : MW committed to FR (defaults to battery.power_mw)
+    model        : fitted model object (required for strategy="ml")
+    feature_df   : feature matrix from build_feature_matrix() (required for strategy="ml")
+    feature_cols : feature column list from train_forecast_model() (required for strategy="ml")
+
+    Returns
+    -------
+    dict with keys:
+      'monthly'  : wide-format DataFrame, same schema as revenue_stack.run_backtest()
+      'summary'  : dict of aggregate stats
+    """
+    from src.analysis.revenue_stack import (
+        calc_ancillary_revenue,
+        BatterySpec,
+        ALL_SERVICES,
+        SERVICE_LABELS,
+    )
+    import numpy as np
+
+    if services is None:
+        services = ALL_SERVICES
+    if fr_mw is None:
+        fr_mw = battery.power_mw
+    fr_mw = float(np.clip(fr_mw, 0, battery.power_mw))
+    arb_mw = battery.power_mw - fr_mw
+    arb_energy_mwh = arb_mw * battery.duration_h
+
+    # --- Ancillary revenue (unchanged from perfect foresight) ---
+    anc = calc_ancillary_revenue(auctions, battery, services, start_date, end_date, fr_mw=fr_mw)
+    if not anc.empty:
+        anc_wide = anc.pivot_table(
+            index="month", columns="service", values="revenue_gbp", fill_value=0
+        )
+        anc_wide.columns = [f"{c}_rev" for c in anc_wide.columns]
+    else:
+        anc_wide = pd.DataFrame()
+
+    # --- Forecast-driven arbitrage ---
+    apx_full = market_index[market_index["dataProvider"] == "APXMIDP"].copy()
+    apx_full["settlementDate"] = pd.to_datetime(apx_full["settlementDate"]).dt.normalize()
+
+    sd = pd.Timestamp(start_date) if start_date else apx_full["settlementDate"].min()
+    ed = pd.Timestamp(end_date)   if end_date   else apx_full["settlementDate"].max()
+    apx_period = apx_full[(apx_full["settlementDate"] >= sd) & (apx_full["settlementDate"] <= ed)]
+
+    n_periods  = max(1, int(battery.duration_h * 2))
+    energy_out = arb_energy_mwh
+    energy_in  = arb_energy_mwh / battery.efficiency_rt
+
+    arb_rows = []
+    if arb_mw > 0:
+        for date, day_actual in apx_period.groupby("settlementDate"):
+            actual_prices = day_actual.set_index("settlementPeriod")["price"]
+
+            if strategy == "naive":
+                forecast_prices = naive_day_prices(apx_full, date)
+            elif strategy == "ml":
+                forecast_prices = predict_day_prices(model, feature_cols, feature_df, date)
+            else:
+                raise ValueError(f"Unknown strategy '{strategy}'")
+
+            if forecast_prices.empty:
+                continue
+
+            result = _dispatch_day(
+                forecast_prices, actual_prices,
+                n_periods, energy_out, energy_in,
+                battery.cycling_cost_per_mwh,
+            )
+            if result:
+                result["date"] = date
+                arb_rows.append(result)
+
+    if arb_rows:
+        daily_arb = pd.DataFrame(arb_rows)
+        daily_arb["month"] = pd.to_datetime(daily_arb["date"]).dt.to_period("M")
+        imb_wide = (
+            daily_arb.groupby("month")
+            .agg(
+                imbalance_revenue_gbp=("imbalance_revenue_gbp", "sum"),
+                cycling_cost_gbp=("cycling_cost_gbp", "sum"),
+                mwh_cycled=("mwh_cycled", "sum"),
+            )
+            .reset_index()
+            .set_index("month")
+        )
+    else:
+        imb_wide = pd.DataFrame()
+
+    # --- Merge and compute monthly totals ---
+    frames = [f for f in [anc_wide, imb_wide] if not f.empty]
+    if not frames:
+        return {"monthly": pd.DataFrame(), "summary": {}}
+
+    monthly = frames[0].join(frames[1:], how="outer").fillna(0).reset_index()
+    monthly["month_dt"] = monthly["month"].dt.to_timestamp()
+
+    rev_cols  = [c for c in monthly.columns if c.endswith("_rev") or c == "imbalance_revenue_gbp"]
+    cost_cols = [c for c in monthly.columns if c == "cycling_cost_gbp"]
+
+    for col in rev_cols + cost_cols:
+        monthly[col] = monthly[col] * battery.availability_factor
+    if "mwh_cycled" in monthly.columns:
+        monthly["mwh_cycled"] = monthly["mwh_cycled"] * battery.availability_factor
+
+    monthly["gross_revenue"] = monthly[rev_cols].sum(axis=1)
+    monthly["cycling_cost"]  = monthly[cost_cols].sum(axis=1) if cost_cols else 0.0
+    monthly["net_revenue"]   = monthly["gross_revenue"] - monthly["cycling_cost"]
+
+    years     = len(monthly) / 12
+    net_total = monthly["net_revenue"].sum()
+    total_mwh_cycled = monthly["mwh_cycled"].sum() if "mwh_cycled" in monthly.columns else 0.0
+
+    breakdown = {}
+    for col in rev_cols:
+        label = col.replace("_rev", "") if col.endswith("_rev") else "Imbalance"
+        breakdown[label] = round(monthly[col].sum(), 0)
+
+    summary = {
+        "total_gross":        round(monthly["gross_revenue"].sum(), 0),
+        "total_cycling_cost": round(monthly["cycling_cost"].sum(), 0),
+        "total_net":          round(net_total, 0),
+        "total_mwh_cycled":   round(total_mwh_cycled, 1),
+        "years_covered":      round(years, 2),
+        "annualised_net":     round(net_total / years, 0) if years > 0 else 0,
+        "annualised_per_mw":  round(net_total / years / battery.power_mw, 0) if years > 0 and battery.power_mw > 0 else 0,
+        "breakdown":          breakdown,
+        "top_service":        max(breakdown, key=breakdown.get) if breakdown else "N/A",
+        "fr_mw":              fr_mw,
+        "arb_mw":             arb_mw,
+    }
+
+    return {"monthly": monthly, "summary": summary}

@@ -26,6 +26,13 @@ from src.analysis.revenue_stack import (
     SERVICE_LABELS,
     SERVICE_COLOURS,
 )
+from src.analysis.price_forecast import (
+    build_feature_matrix,
+    train_forecast_model,
+    run_forecast_backtest,
+    get_feature_importances,
+    DEFAULT_TEST_START,
+)
 
 # ---------------------------------------------------------------------------
 # Standalone guard — set_page_config only when run directly, not via app.py
@@ -62,8 +69,17 @@ def load_market_index() -> pd.DataFrame:
     return pd.read_parquet(p)
 
 
-auctions  = load_auctions()
-mkt_index = load_market_index()
+@st.cache_data
+def load_generation_daily() -> pd.DataFrame:
+    p = PROCESSED / "generation_daily.parquet"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p)
+
+
+auctions    = load_auctions()
+mkt_index   = load_market_index()
+gen_daily   = load_generation_daily()
 
 # ---------------------------------------------------------------------------
 # Sidebar — parameters
@@ -164,6 +180,43 @@ date_range = st.sidebar.date_input(
 start_date = date_range[0] if len(date_range) == 2 else data_start
 end_date   = date_range[1] if len(date_range) == 2 else data_end
 
+st.sidebar.divider()
+st.sidebar.subheader("Dispatch Strategy")
+
+dispatch_strategy = st.sidebar.radio(
+    "Price signal used for arbitrage scheduling",
+    options=["Perfect Foresight", "Naive (D-1 prices)", "ML Model"],
+    index=0,
+    help=(
+        "**Perfect Foresight**: schedules dispatch using actual day-D prices — "
+        "the revenue ceiling, not achievable in practice.\n\n"
+        "**Naive**: uses yesterday's prices as the forecast for today — "
+        "a zero-skill baseline.\n\n"
+        "**ML Model**: trains on historical features (lagged prices, generation mix, "
+        "seasonality) and forecasts day-D prices to drive dispatch."
+    ),
+)
+
+ml_model_type = "rf"
+if dispatch_strategy == "ML Model":
+    ml_model_type = st.sidebar.selectbox(
+        "Model",
+        options=["rf", "xgb"],
+        format_func=lambda x: "Random Forest" if x == "rf" else "XGBoost",
+        index=0,
+    )
+
+
+@st.cache_resource
+def load_forecast_model(model_type: str):
+    """Train and cache the ML price forecast model. Runs once per deployment."""
+    feature_df = build_feature_matrix(load_market_index(), load_generation_daily())
+    model, feature_cols, train_metrics, test_metrics = train_forecast_model(
+        feature_df, model_type=model_type, test_start=DEFAULT_TEST_START
+    )
+    return model, feature_df, feature_cols, train_metrics, test_metrics
+
+
 # ---------------------------------------------------------------------------
 # Run backtest
 # ---------------------------------------------------------------------------
@@ -215,9 +268,64 @@ st.sidebar.caption(
     f"(maximises net revenue at current parameters)"
 )
 
-result  = run_backtest(
-    auctions, mi_input, battery, selected_services, start_date, end_date, fr_mw=fr_mw
-)
+# Run the primary backtest for the selected strategy
+if dispatch_strategy == "Perfect Foresight":
+    result = run_backtest(
+        auctions, mi_input, battery, selected_services, start_date, end_date, fr_mw=fr_mw
+    )
+    # Add total_mwh_cycled to summary for the comparison chart
+    if result["monthly"] is not None and not result["monthly"].empty:
+        cyc_col = result["monthly"].get("cycling_cost_gbp", result["monthly"].get("cycling_cost", None))
+        mwh_cycled = 0.0
+        if cyc_col is not None:
+            mwh_cycled = float(
+                (result["monthly"]["cycling_cost_gbp"] / battery.cycling_cost_per_mwh).sum()
+                if "cycling_cost_gbp" in result["monthly"].columns and battery.cycling_cost_per_mwh > 0
+                else 0.0
+            )
+        result["summary"]["total_mwh_cycled"] = round(mwh_cycled, 1)
+
+elif dispatch_strategy == "Naive (D-1 prices)":
+    if not include_imbalance:
+        result = run_backtest(
+            auctions, pd.DataFrame(), battery, selected_services, start_date, end_date, fr_mw=fr_mw
+        )
+        result["summary"]["total_mwh_cycled"] = 0.0
+    else:
+        result = run_forecast_backtest(
+            strategy="naive",
+            market_index=mkt_index,
+            auctions=auctions,
+            battery=battery,
+            services=selected_services,
+            start_date=start_date,
+            end_date=end_date,
+            fr_mw=fr_mw,
+        )
+
+else:  # ML Model
+    if not include_imbalance:
+        result = run_backtest(
+            auctions, pd.DataFrame(), battery, selected_services, start_date, end_date, fr_mw=fr_mw
+        )
+        result["summary"]["total_mwh_cycled"] = 0.0
+    else:
+        with st.spinner("Training forecast model… (cached after first run)"):
+            _model, _feature_df, _feature_cols, _train_m, _test_m = load_forecast_model(ml_model_type)
+        result = run_forecast_backtest(
+            strategy="ml",
+            market_index=mkt_index,
+            auctions=auctions,
+            battery=battery,
+            services=selected_services,
+            start_date=start_date,
+            end_date=end_date,
+            fr_mw=fr_mw,
+            model=_model,
+            feature_df=_feature_df,
+            feature_cols=_feature_cols,
+        )
+
 monthly = result["monthly"]
 summary = result["summary"]
 
@@ -445,6 +553,120 @@ st.dataframe(
 st.divider()
 
 # ---------------------------------------------------------------------------
+# Strategy comparison: Revenue / Cycling tradeoff
+# ---------------------------------------------------------------------------
+
+with st.expander("Dispatch Strategy Comparison — Revenue vs. Cycling Tradeoff", expanded=True):
+    st.caption(
+        "Each point shows total net revenue against total MWh cycled over the backtest period "
+        "for one dispatch strategy. A strategy that sits higher and to the left earns more "
+        "revenue while consuming less cycle life — the analytically ideal outcome. "
+        "Perfect Foresight is the revenue ceiling; Naive is the zero-skill floor."
+    )
+
+    if include_imbalance and not mkt_index.empty:
+        with st.spinner("Computing strategy comparison (runs all three strategies)…"):
+
+            # --- Perfect Foresight ---
+            pf_result = run_backtest(
+                auctions, mi_input, battery, selected_services, start_date, end_date, fr_mw=fr_mw
+            )
+            pf_summary = pf_result["summary"]
+            pf_mwh = 0.0
+            if not pf_result["monthly"].empty and "cycling_cost_gbp" in pf_result["monthly"].columns:
+                if battery.cycling_cost_per_mwh > 0:
+                    pf_mwh = float(
+                        (pf_result["monthly"]["cycling_cost_gbp"] / battery.cycling_cost_per_mwh).sum()
+                    )
+
+            # --- Naive ---
+            naive_result = run_forecast_backtest(
+                strategy="naive",
+                market_index=mkt_index,
+                auctions=auctions,
+                battery=battery,
+                services=selected_services,
+                start_date=start_date,
+                end_date=end_date,
+                fr_mw=fr_mw,
+            )
+
+            # --- ML ---
+            with st.spinner("Training ML model for comparison… (cached after first run)"):
+                _cmp_model, _cmp_feat_df, _cmp_feat_cols, _, _ = (
+                    load_forecast_model(ml_model_type)
+                )
+            ml_result = run_forecast_backtest(
+                strategy="ml",
+                market_index=mkt_index,
+                auctions=auctions,
+                battery=battery,
+                services=selected_services,
+                start_date=start_date,
+                end_date=end_date,
+                fr_mw=fr_mw,
+                model=_cmp_model,
+                feature_df=_cmp_feat_df,
+                feature_cols=_cmp_feat_cols,
+            )
+
+        pf_net    = pf_summary.get("total_net", 0) / 1_000
+        naive_net = naive_result["summary"].get("total_net", 0) / 1_000
+        ml_net    = ml_result["summary"].get("total_net", 0) / 1_000
+
+        naive_mwh = naive_result["summary"].get("total_mwh_cycled", 0)
+        ml_mwh    = ml_result["summary"].get("total_mwh_cycled", 0)
+
+        pf_capture    = 100.0
+        naive_capture = round(naive_net / pf_net * 100, 1) if pf_net > 0 else 0.0
+        ml_capture    = round(ml_net    / pf_net * 100, 1) if pf_net > 0 else 0.0
+
+        model_label = "Random Forest" if ml_model_type == "rf" else "XGBoost"
+
+        comparison_df = pd.DataFrame([
+            {"Strategy": "Perfect Foresight", "Net Revenue (£k)": pf_net,    "MWh Cycled": round(pf_mwh, 0),    "Capture Rate": f"{pf_capture:.0f}%"},
+            {"Strategy": "Naive (D-1)",        "Net Revenue (£k)": naive_net, "MWh Cycled": round(naive_mwh, 0), "Capture Rate": f"{naive_capture:.1f}%"},
+            {"Strategy": f"ML ({model_label})", "Net Revenue (£k)": ml_net,   "MWh Cycled": round(ml_mwh, 0),   "Capture Rate": f"{ml_capture:.1f}%"},
+        ])
+
+        fig_cmp = go.Figure()
+        colours = {"Perfect Foresight": "#2ca02c", "Naive (D-1)": "#ff7f0e", f"ML ({model_label})": "#1f77b4"}
+        for _, row in comparison_df.iterrows():
+            fig_cmp.add_trace(go.Scatter(
+                x=[row["MWh Cycled"]],
+                y=[row["Net Revenue (£k)"]],
+                mode="markers+text",
+                name=row["Strategy"],
+                text=[row["Strategy"]],
+                textposition="top center",
+                marker=dict(size=16, color=colours.get(row["Strategy"], "#888")),
+            ))
+
+        fig_cmp.update_layout(
+            height=360,
+            template="plotly_white",
+            xaxis_title="Total MWh Cycled",
+            yaxis_title="Total Net Revenue (£k)",
+            showlegend=False,
+            margin=dict(t=30, b=40),
+        )
+        st.plotly_chart(fig_cmp, use_container_width=True)
+
+        st.dataframe(
+            comparison_df.style.format({"Net Revenue (£k)": "{:,.1f}", "MWh Cycled": "{:,.0f}"}),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.caption(
+            "**Capture rate** = realised net revenue ÷ perfect-foresight net revenue. "
+            "Reflects how much of the theoretical revenue ceiling each strategy achieves."
+        )
+    else:
+        st.info("Enable 'Include imbalance arbitrage' to see the strategy comparison.")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
 # Methodology notes (collapsible)
 # ---------------------------------------------------------------------------
 
@@ -473,6 +695,29 @@ continuously and optimise both stages simultaneously.
 
 ---
 
+**Dispatch strategies**
+
+The arbitrage schedule is derived from a price signal for day D. Three signals are available:
+
+- **Perfect Foresight**: the optimizer receives the actual day-D APXMIDP prices and picks
+  the true optimal charge/discharge windows. This is the revenue ceiling — it is not
+  achievable in practice but provides a useful benchmark.
+- **Naive (D-1 prices)**: at the end of day D-1, yesterday's actual prices are used as
+  the forecast for day D. The schedule is derived from this forecast, then evaluated
+  against actual day-D prices to compute realised revenue. This is the zero-skill floor —
+  any useful model should outperform it.
+- **ML Model**: a machine learning model trained on historical data predicts day-D prices
+  using features available at end of day D-1 (lagged prices, generation mix, seasonality).
+  The predicted prices drive the same dispatch logic; realised revenue is computed against
+  actual prices. See the ML model section below for details.
+
+The **capture rate** (realised revenue ÷ perfect-foresight revenue) summarises how much
+of the theoretical ceiling each strategy achieves. The **revenue/cycling tradeoff chart**
+above shows the efficiency of each strategy: a better strategy earns more revenue while
+consuming less cycle life.
+
+---
+
 **Ancillary service availability revenue**
 - Revenue = `clearing_price (£/MW/h) × {fr_mw} MW committed to FR × 4 hours per EFA block`
 - Services of different response speeds (DC, DR, DM) can be stacked on the same physical MW
@@ -481,6 +726,8 @@ continuously and optimise both stages simultaneously.
   assuming the battery maintains sufficient SoC headroom to respond in both directions.
 - Clearing prices sourced from NESO Data Portal (legacy DC/DR/DM auctions Sep 2021–Nov 2023,
   EAC service Nov 2023–present).
+- Ancillary revenue is identical across all three dispatch strategies — it does not depend
+  on price forecasting.
 
 **Wholesale energy arbitrage revenue**
 - One arbitrage cycle per day maximum, using the **{arb_mw} MW** available for arbitrage.
@@ -489,7 +736,7 @@ continuously and optimise both stages simultaneously.
 - Gross profit = `avg_discharge_price × {arb_energy_mwh:.0f} MWh`
   − `avg_charge_price × {arb_energy_mwh / (efficiency_pct / 100):.1f} MWh`
   (extra input energy needed to account for {100 - efficiency_pct}% round-trip losses).
-- Cycle only executed on days where gross profit exceeds the cycling wear cost.
+- Cycle only executed on days where realised gross profit exceeds the cycling wear cost.
 - **Price reference: APXMIDP market index** (APX Power UK) from Elexon Insights
   (Jul 2023–present). This is the actual GB spot settlement reference price, giving a
   materially more realistic daily spread than the imbalance settlement price (SSP),
@@ -505,11 +752,20 @@ continuously and optimise both stages simultaneously.
   consistent with observed GB BESS fleet performance: Modo Energy's *GB Battery Storage
   Report* (2024) reports median fleet availability of 95–97% across contracted windows.
 
-**Cycling wear cost**
+**Cycling wear cost and battery degradation**
 - Applied to imbalance arbitrage trades only: `{cycling_cost} £/MWh × MWh discharged per trade`.
 - Ancillary service cycling (energy delivered during frequency events) is not separately
   modelled — it is minor relative to availability payments and is typically compensated
   via the service contract.
+- *Why cycling matters beyond cost:* lithium-ion cells degrade through two primary
+  mechanisms that accelerate with use — SEI (solid electrolyte interphase) layer growth,
+  which consumes cyclable lithium irreversibly, and lithium plating at the anode, which
+  increases with deeper discharge and higher charge rates. Each MWh cycled consumes a
+  small fraction of the cell's finite cycle life. The `cycling_cost_per_mwh` parameter
+  is a financial proxy for this physical degradation: more aggressive dispatch earns
+  more revenue in the short run but consumes cycle life faster, reducing the asset's
+  useful life and residual value. This is why the revenue/cycling tradeoff chart is the
+  core output of the strategy comparison, not revenue alone.
 
 **What this model does not capture**
 - Intraday / day-ahead market trading (DA price data not yet integrated)
@@ -518,3 +774,63 @@ continuously and optimise both stages simultaneously.
 - Real-time dispatch constraints or grid connection limits
 - Half-hourly SoC simulation within the FR headroom band (planned for a future LP/MIP module)
     """)
+
+    if dispatch_strategy == "ML Model" and include_imbalance:
+        model_label = "Random Forest" if ml_model_type == "rf" else "XGBoost"
+        st.markdown("---")
+        st.markdown(f"**ML price forecast model ({model_label})**")
+
+        st.markdown(f"""
+The ML strategy uses a **{model_label}** regressor to predict the 48 half-hourly APXMIDP
+prices for day D using features available at the end of day D-1.
+
+*Why {model_label}?* Tree-based ensemble methods are well suited to this problem: the
+feature set is tabular (lagged prices, generation mix ratios, temporal encodings) rather
+than raw sequences; they require no feature scaling; they are robust on datasets of this
+size (~30,000 training rows); and they provide interpretable feature importances.
+An LSTM was considered but is likely overkill given ~2 years of training data and would
+be harder to explain. A naive lag model sets the zero-skill baseline.
+
+**Features used (all available at end of day D-1):**
+- Same-period lagged prices: price at the same settlement period 1, 2, and 7 days prior
+- Previous-day price statistics: mean, standard deviation, max, and min across all 48 periods
+- Generation mix (daily, from D-1): total generation, renewable fraction, fossil fraction,
+  and per-fuel breakdown (gas, wind, nuclear, hydro, etc.)
+- Cyclical temporal encodings: settlement period, day-of-week, and day-of-year encoded
+  as sin/cos pairs to preserve circularity (e.g. period 48 and period 1 are adjacent)
+- Weekend flag
+
+**Train/test split:** strict temporal split — training data ends before
+`{DEFAULT_TEST_START}` to prevent any look-ahead bias. The model never sees
+future prices during training.
+
+**Known limitations:** tree-based models cannot extrapolate beyond the price ranges seen
+during training; electricity price forecasting is inherently noisy; and the model improves
+dispatch quality on average but does not eliminate forecast error on individual days.
+        """)
+
+        # Show model metrics and feature importances
+        with st.spinner("Loading model metrics…"):
+            _model_exp, _, _feat_cols_exp, _train_m, _test_m = load_forecast_model(ml_model_type)
+
+        col_a, col_b = st.columns(2)
+        col_a.metric("Train RMSE (£/MWh)", f"{_train_m['rmse']:.2f}", help=f"n = {_train_m['n_samples']:,} periods")
+        col_b.metric("Test RMSE (£/MWh)",  f"{_test_m['rmse']:.2f}",  help=f"n = {_test_m['n_samples']:,} periods (held-out, after {DEFAULT_TEST_START})")
+        col_a.metric("Train MAE (£/MWh)",  f"{_train_m['mae']:.2f}")
+        col_b.metric("Test MAE (£/MWh)",   f"{_test_m['mae']:.2f}")
+
+        importances = get_feature_importances(_model_exp, _feat_cols_exp).head(10)
+        fig_imp = go.Figure(go.Bar(
+            x=importances.values[::-1],
+            y=importances.index[::-1],
+            orientation="h",
+            marker_color="#1f77b4",
+        ))
+        fig_imp.update_layout(
+            height=320,
+            template="plotly_white",
+            title="Top 10 feature importances",
+            xaxis_title="Importance",
+            margin=dict(t=40, l=160),
+        )
+        st.plotly_chart(fig_imp, use_container_width=True)

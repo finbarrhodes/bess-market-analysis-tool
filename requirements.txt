@@ -13,9 +13,10 @@ python-dotenv>=1.0.0
 beautifulsoup4>=4.12.0
 ElexonDataPortal>=2.0.14
 
-# Data analysis and forecasting (future analytical features)
+# Data analysis and forecasting
 scikit-learn>=1.3.0
 statsmodels>=0.14.0
+xgboost>=2.0.0
 
 # Configuration
 pyyaml>=6.0
