@@ -79,6 +79,24 @@ st.markdown(
     """
 )
 
+# ---------------------------------------------------------------------------
+# Key market events timeline
+# ---------------------------------------------------------------------------
+
+st.subheader("GB BESS Market: Key Events")
+st.markdown(
+    """
+    | Year | Event |
+    |------|-------|
+    | **2020** | NESO launches Dynamic Containment (DC) — BESS becomes the dominant provider within months, displacing gas peakers |
+    | **2021** | Dynamic Regulation (DR) and Dynamic Moderation (DM) introduced; revenue stacking across all three services becomes standard |
+    | **2022** | Revenue peak — DC High averaging £15–20/MW/h; leading assets earning ~£156k/MW/year |
+    | **Late 2022** | Rapid capacity influx saturates frequency response markets; clearing prices begin a sharp, sustained decline |
+    | **2023** | Revenue compression accelerates; wholesale arbitrage and Capacity Market grow significantly in relative importance |
+    | **2024–25** | Stack diversification — operators blend FR, arbitrage, and BM participation; long-duration projects begin to emerge |
+    """
+)
+
 st.divider()
 
 # ---------------------------------------------------------------------------
@@ -97,6 +115,7 @@ with col1:
         "generation mix trends, and the correlation between system prices and "
         "DC High auctions."
     )
+    st.page_link("src/visualization/dashboard.py", label="Market Overview →")
 
 with col2:
     st.markdown("**Revenue Backtester**")
@@ -106,6 +125,7 @@ with col2:
         "dispatch strategies, and run sensitivity analysis across a range of "
         "battery sizes."
     )
+    st.page_link("src/visualization/backtester.py", label="Revenue Backtester →")
 
 with col3:
     st.markdown("**Methodology & Data**")
@@ -114,3 +134,18 @@ with col3:
         "of the backtester. Explains the two-stage participation model, dispatch "
         "strategies, battery cycling cost, and the ML price forecast approach."
     )
+    st.page_link("src/visualization/methodology.py", label="Methodology & Data →")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Data sources
+# ---------------------------------------------------------------------------
+
+st.caption(
+    "Data sourced from the "
+    "[Elexon Insights Solution API](https://bmrs.elexon.co.uk/) "
+    "and the [NESO Data Portal](https://www.neso.energy/data-portal). "
+    "All prices in GBP. Auction data covers GB Dynamic Services (DC, DR, DM) "
+    "from July 2023 onwards."
+)
