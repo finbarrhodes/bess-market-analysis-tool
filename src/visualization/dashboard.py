@@ -198,7 +198,7 @@ with sub_auction:
             color="Service",
             labels={"EFA Date": "Date"},
         )
-        fig.update_layout(height=450, template="plotly_white")
+        fig.update_layout(height=450, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5")
         st.plotly_chart(fig, use_container_width=True)
 
         left, right = st.columns(2)
@@ -212,7 +212,7 @@ with sub_auction:
                 color="Service",
                 labels={"Clearing Price": "£/MW/h"},
             )
-            fig.update_layout(height=400, template="plotly_white", showlegend=False)
+            fig.update_layout(height=400, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5", showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
 
         with right:
@@ -237,7 +237,7 @@ with sub_auction:
                 tickvals=list(EFA_BLOCKS.keys()),
                 ticktext=[f"EFA {k}<br>{v}" for k, v in EFA_BLOCKS.items()],
             )
-            fig.update_layout(height=400, template="plotly_white")
+            fig.update_layout(height=400, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5")
             st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Summary Statistics")
@@ -317,7 +317,7 @@ with sub_spread:
                 labels={"Spread": "£/MW/h", "EFA Date": "Date"},
             )
             fig.add_hline(y=0, line_dash="dash", line_color="grey", opacity=0.5)
-            fig.update_layout(height=420, template="plotly_white")
+            fig.update_layout(height=420, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5")
             st.plotly_chart(fig, use_container_width=True)
 
             # DR negative spread explanation (only show if the data supports it)
@@ -365,7 +365,7 @@ with sub_spread:
                     points="outliers",
                 )
                 fig.add_hline(y=0, line_dash="dash", line_color="grey", opacity=0.5)
-                fig.update_layout(height=400, template="plotly_white", showlegend=False)
+                fig.update_layout(height=400, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5", showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
             with right:
@@ -389,7 +389,7 @@ with sub_spread:
                     tickvals=list(EFA_BLOCKS.keys()),
                     ticktext=[f"EFA {k}<br>{v}" for k, v in EFA_BLOCKS.items()],
                 )
-                fig.update_layout(height=400, template="plotly_white")
+                fig.update_layout(height=400, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5")
                 st.plotly_chart(fig, use_container_width=True)
 
             # ---- Chart 3: heatmap — EFA block × month ----
@@ -414,7 +414,7 @@ with sub_spread:
                 labels={"color": "£/MW/h", "x": "EFA Block", "y": "Month"},
                 aspect="auto",
             )
-            fig.update_layout(height=420, template="plotly_white")
+            fig.update_layout(height=420, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5")
             st.plotly_chart(fig, use_container_width=True)
 
             # ---- Summary table ----
@@ -476,7 +476,7 @@ with sub_system:
                 x=daily_sp["settlementDate"],
                 y=daily_sp["avg_ssp"],
                 name="Avg SSP",
-                line=dict(color="#EF553B"),
+                line=dict(color="#C9400A"),
             )
         )
         fig.add_trace(
@@ -484,12 +484,12 @@ with sub_system:
                 x=daily_sp["settlementDate"],
                 y=daily_sp["avg_sbp"],
                 name="Avg SBP",
-                line=dict(color="#636EFA"),
+                line=dict(color="#0D7680"),
             )
         )
         fig.update_layout(
             height=450,
-            template="plotly_white",
+            template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
             yaxis_title="£/MWh",
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -527,7 +527,7 @@ with sub_system:
             )
             fig.update_layout(
                 height=400,
-                template="plotly_white",
+                template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
                 xaxis_title="Settlement Period",
                 yaxis_title="£/MWh",
             )
@@ -548,15 +548,15 @@ with sub_system:
                     x=daily_sp["settlementDate"],
                     y=daily_sp["imbalance_spread"],
                     name="SBP − SSP",
-                    line=dict(color="#00CC96"),
+                    line=dict(color="#4E8A3C"),
                     fill="tozeroy",
-                    fillcolor="rgba(0,204,150,0.12)",
+                    fillcolor="rgba(78,138,60,0.12)",
                 )
             )
             fig.add_hline(y=0, line_dash="dash", line_color="grey", opacity=0.5)
             fig.update_layout(
                 height=400,
-                template="plotly_white",
+                template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
                 yaxis_title="£/MWh",
                 xaxis_title="Date",
             )
@@ -612,14 +612,14 @@ with sub_gen:
             color="Fuel Group",
             labels={"settlementDate": "Week ending"},
         )
-        fig.update_layout(height=500, template="plotly_white")
+        fig.update_layout(height=500, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5")
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Average Share by Fuel Group")
         fuel_share = gen_pivot.mean()
         fuel_share = fuel_share[fuel_share > 0].sort_values(ascending=False)
         fig = px.pie(values=fuel_share.values, names=fuel_share.index)
-        fig.update_layout(height=450)
+        fig.update_layout(height=450, paper_bgcolor="#FFF1E5")
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -688,7 +688,7 @@ with sub_cross:
                     x=merged["date"],
                     y=merged["avg_system_price"],
                     name="Avg SSP",
-                    line=dict(color="#EF553B"),
+                    line=dict(color="#C9400A"),
                 ),
                 secondary_y=False,
             )
@@ -697,11 +697,11 @@ with sub_cross:
                     x=merged["date"],
                     y=merged["avg_dc_clearing_price"],
                     name="Avg DC High",
-                    line=dict(color="#636EFA"),
+                    line=dict(color="#0D7680"),
                 ),
                 secondary_y=True,
             )
             fig.update_yaxes(title_text="System Price (£/MWh)", secondary_y=False)
             fig.update_yaxes(title_text="DC Clearing (£/MW/h)", secondary_y=True)
-            fig.update_layout(height=500, template="plotly_white")
+            fig.update_layout(height=500, template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5")
             st.plotly_chart(fig, use_container_width=True)

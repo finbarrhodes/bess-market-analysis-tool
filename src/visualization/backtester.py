@@ -417,7 +417,7 @@ with tab_results:
         fig.update_layout(
             barmode="relative",
             height=450,
-            template="plotly_white",
+            template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
             yaxis_title="£k",
             xaxis_title="Month",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -440,16 +440,16 @@ with tab_results:
                 y=trade_off_df["total_net_gbp"] / 1_000,
                 mode="lines",
                 name="Total net revenue",
-                line=dict(color="#1f77b4", width=2.5),
+                line=dict(color="#0D7680", width=2.5),
             ))
 
             fig_tradeoff.add_vline(
                 x=fr_mw,
                 line_dash="dash",
-                line_color="#d62728",
+                line_color="#8B2020",
                 annotation_text=f"Current: {fr_mw} MW",
                 annotation_position="top right",
-                annotation_font_color="#d62728",
+                annotation_font_color="#8B2020",
             )
 
             optimal_row = trade_off_df.loc[trade_off_df["fr_mw"] == optimal_fr_mw]
@@ -459,12 +459,12 @@ with tab_results:
                     y=optimal_row["total_net_gbp"] / 1_000,
                     mode="markers",
                     name=f"Optimal: {optimal_fr_mw:.0f} MW to FR",
-                    marker=dict(symbol="star", size=14, color="#2ca02c"),
+                    marker=dict(symbol="star", size=14, color="#4E8A3C"),
                 ))
 
             fig_tradeoff.update_layout(
                 height=340,
-                template="plotly_white",
+                template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
                 xaxis_title="MW committed to FR availability",
                 yaxis_title="Total net revenue (£k)",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -485,12 +485,12 @@ with tab_results:
             y=monthly_sorted["cumulative_net"] / 1_000,
             mode="lines",
             fill="tozeroy",
-            line=dict(color="#1f77b4", width=2),
-            fillcolor="rgba(31,119,180,0.15)",
+            line=dict(color="#0D7680", width=2),
+            fillcolor="rgba(13,118,128,0.15)",
         ))
         fig2.update_layout(
             height=380,
-            template="plotly_white",
+            template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
             yaxis_title="£k",
             xaxis_title="Month",
         )
@@ -512,7 +512,7 @@ with tab_results:
                 textinfo="label+percent",
                 hovertemplate="%{label}: £%{value:,.0f}<extra></extra>",
             ))
-            fig3.update_layout(height=380, showlegend=False, margin=dict(t=20, b=20))
+            fig3.update_layout(height=380, showlegend=False, margin=dict(t=20, b=20), paper_bgcolor="#FFF1E5")
             st.plotly_chart(fig3, use_container_width=True)
 
 # ---------------------------------------------------------------------------
@@ -593,7 +593,7 @@ with tab_strategy:
         ])
 
         fig_cmp = go.Figure()
-        colours = {"Perfect Foresight": "#2ca02c", "Naive (D-1)": "#ff7f0e", f"ML ({model_label})": "#1f77b4"}
+        colours = {"Perfect Foresight": "#4E8A3C", "Naive (D-1)": "#C9400A", f"ML ({model_label})": "#0D7680"}
         for _, row in comparison_df.iterrows():
             fig_cmp.add_trace(go.Scatter(
                 x=[row["MWh Cycled"]],
@@ -607,7 +607,7 @@ with tab_strategy:
 
         fig_cmp.update_layout(
             height=360,
-            template="plotly_white",
+            template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
             xaxis_title="Total MWh Cycled",
             yaxis_title="Total Net Revenue (£k)",
             showlegend=False,
@@ -672,11 +672,11 @@ dispatch quality on average but does not eliminate forecast error on individual 
                 x=importances.values[::-1],
                 y=importances.index[::-1],
                 orientation="h",
-                marker_color="#1f77b4",
+                marker_color="#0D7680",
             ))
             fig_imp.update_layout(
                 height=320,
-                template="plotly_white",
+                template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
                 title="Top 10 feature importances",
                 xaxis_title="Importance",
                 margin=dict(t=40, l=160),

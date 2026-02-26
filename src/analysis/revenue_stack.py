@@ -47,14 +47,14 @@ ALL_SERVICES = list(SERVICE_LABELS.keys())
 
 # Colour map for dashboard charts (revenue streams)
 SERVICE_COLOURS = {
-    "DCH": "#1f77b4",
-    "DCL": "#aec7e8",
-    "DRH": "#2ca02c",
-    "DRL": "#98df8a",
-    "DMH": "#9467bd",
-    "DML": "#c5b0d5",
-    "Imbalance": "#ff7f0e",
-    "Cycling cost": "#d62728",
+    "DCH": "#0D7680",   # FT teal
+    "DCL": "#5BA8AE",   # lighter teal
+    "DRH": "#4E8A3C",   # dark green
+    "DRL": "#8AB87F",   # lighter green
+    "DMH": "#7B3FA0",   # purple
+    "DML": "#B08FC8",   # lighter purple
+    "Imbalance": "#C9400A",  # warm orange-red
+    "Cycling cost": "#8B2020",  # dark red
 }
 
 

@@ -58,7 +58,7 @@ st.markdown(
     | **Frequency response** (Dynamic Services) | Paid a £/MW/h availability fee to hold discharge or charge headroom; activated automatically when grid frequency deviates from 50 Hz |
     | **Wholesale arbitrage** | Charge during low-price periods (high wind, low demand); discharge during high-price periods |
     | **Balancing Mechanism (BM)** | Dispatched by NESO in real time as a BM unit to correct short-term supply/demand imbalance |
-    | **Capacity Market** | Annual availability payment for committing to generate during periods of system stress |
+    | **Capacity Market** | Annual availability payment for committing to providing energy capacity during periods of system stress |
 
     **Why this tool focuses on Dynamic Services and wholesale prices:**
     Dynamic services (DC, DM, DR) dominated the GB BESS revenue stack from roughly 2021 through
