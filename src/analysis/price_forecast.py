@@ -383,7 +383,6 @@ def run_forecast_backtest(
     services: list,
     start_date,
     end_date,
-    fr_mw: float = None,
     model=None,
     feature_df: pd.DataFrame = None,
     feature_cols: list = None,
@@ -391,8 +390,13 @@ def run_forecast_backtest(
     """
     Run a forecast-driven revenue backtest for either the 'naive' or 'ml' strategy.
 
-    Ancillary revenue (FR availability) is identical to the perfect-foresight backtest —
-    it does not depend on price forecasting. Only the arbitrage stream changes.
+    Uses a two-pass approach:
+      1. Collect forecast prices for all days in the period (first pass).
+      2. Run compute_daily_fr_schedule() to determine per-day FR/arb allocation:
+         for each day D, compare the confirmed FR clearing price (known from the
+         EAC day-ahead auction) against a shadow arb estimate from the forecast.
+      3. Dispatch within the allocated arb_mw for each day, realising revenue
+         against actual prices (second pass).
 
     Parameters
     ----------
@@ -403,7 +407,6 @@ def run_forecast_backtest(
     services     : list of service codes to include
     start_date   : inclusive backtest start
     end_date     : inclusive backtest end
-    fr_mw        : MW committed to FR (defaults to battery.power_mw)
     model        : fitted model object (required for strategy="ml")
     feature_df   : feature matrix from build_feature_matrix() (required for strategy="ml")
     feature_cols : feature column list from train_forecast_model() (required for strategy="ml")
@@ -416,22 +419,50 @@ def run_forecast_backtest(
     """
     from src.analysis.revenue_stack import (
         calc_ancillary_revenue,
-        BatterySpec,
+        compute_daily_fr_schedule,
         ALL_SERVICES,
-        SERVICE_LABELS,
     )
     import numpy as np
 
     if services is None:
         services = ALL_SERVICES
-    if fr_mw is None:
-        fr_mw = battery.power_mw
-    fr_mw = float(np.clip(fr_mw, 0, battery.power_mw))
-    arb_mw = battery.power_mw - fr_mw
-    arb_energy_mwh = arb_mw * battery.duration_h
 
-    # --- Ancillary revenue (unchanged from perfect foresight) ---
-    anc = calc_ancillary_revenue(auctions, battery, services, start_date, end_date, fr_mw=fr_mw)
+    # --- Filter APX spot prices ---
+    apx_full = market_index[market_index["dataProvider"] == "APXMIDP"].copy()
+    apx_full["settlementDate"] = pd.to_datetime(apx_full["settlementDate"]).dt.normalize()
+
+    sd = pd.Timestamp(start_date) if start_date else apx_full["settlementDate"].min()
+    ed = pd.Timestamp(end_date)   if end_date   else apx_full["settlementDate"].max()
+    apx_period = apx_full[(apx_full["settlementDate"] >= sd) & (apx_full["settlementDate"] <= ed)]
+
+    # --- First pass: collect forecast prices for all days ---
+    forecast_prices_by_date = {}
+    for date, day_actual in apx_period.groupby("settlementDate"):
+        if strategy == "naive":
+            fp = naive_day_prices(apx_full, date)
+        elif strategy == "ml":
+            fp = predict_day_prices(model, feature_cols, feature_df, date)
+        else:
+            raise ValueError(f"Unknown strategy '{strategy}'")
+        if not fp.empty:
+            forecast_prices_by_date[date] = fp
+
+    # --- Dynamic day-ahead capacity allocation ---
+    # For each day D: confirmed FR clearing price vs shadow arb estimate from forecast.
+    fr_schedule = compute_daily_fr_schedule(
+        auctions, forecast_prices_by_date, battery, services, start_date, end_date
+    )
+    arb_sched_map = {
+        pd.Timestamp(k).normalize(): battery.power_mw - float(v)
+        for k, v in fr_schedule.items()
+    }
+    avg_fr_mw  = float(fr_schedule.mean()) if len(fr_schedule) > 0 else battery.power_mw
+    avg_arb_mw = battery.power_mw - avg_fr_mw
+
+    # --- Ancillary revenue (scaled by per-day fr_mw from allocation) ---
+    anc = calc_ancillary_revenue(
+        auctions, battery, services, start_date, end_date, fr_schedule=fr_schedule,
+    )
     if not anc.empty:
         anc_wide = anc.pivot_table(
             index="month", columns="service", values="revenue_gbp", fill_value=0
@@ -440,41 +471,31 @@ def run_forecast_backtest(
     else:
         anc_wide = pd.DataFrame()
 
-    # --- Forecast-driven arbitrage ---
-    apx_full = market_index[market_index["dataProvider"] == "APXMIDP"].copy()
-    apx_full["settlementDate"] = pd.to_datetime(apx_full["settlementDate"]).dt.normalize()
+    # --- Second pass: forecast-driven dispatch within allocated arb_mw ---
+    n_periods = max(1, int(battery.duration_h * 2))
+    arb_rows  = []
 
-    sd = pd.Timestamp(start_date) if start_date else apx_full["settlementDate"].min()
-    ed = pd.Timestamp(end_date)   if end_date   else apx_full["settlementDate"].max()
-    apx_period = apx_full[(apx_full["settlementDate"] >= sd) & (apx_full["settlementDate"] <= ed)]
+    for date, day_actual in apx_period.groupby("settlementDate"):
+        actual_prices   = day_actual.set_index("settlementPeriod")["price"]
+        forecast_prices = forecast_prices_by_date.get(date)
+        if forecast_prices is None:
+            continue
 
-    n_periods  = max(1, int(battery.duration_h * 2))
-    energy_out = arb_energy_mwh
-    energy_in  = arb_energy_mwh / battery.efficiency_rt
+        arb_mw_d = arb_sched_map.get(pd.Timestamp(date).normalize(), 0.0)
+        if arb_mw_d <= 0:
+            continue
 
-    arb_rows = []
-    if arb_mw > 0:
-        for date, day_actual in apx_period.groupby("settlementDate"):
-            actual_prices = day_actual.set_index("settlementPeriod")["price"]
+        energy_out_d = arb_mw_d * battery.duration_h
+        energy_in_d  = energy_out_d / battery.efficiency_rt
 
-            if strategy == "naive":
-                forecast_prices = naive_day_prices(apx_full, date)
-            elif strategy == "ml":
-                forecast_prices = predict_day_prices(model, feature_cols, feature_df, date)
-            else:
-                raise ValueError(f"Unknown strategy '{strategy}'")
-
-            if forecast_prices.empty:
-                continue
-
-            result = _dispatch_day(
-                forecast_prices, actual_prices,
-                n_periods, energy_out, energy_in,
-                battery.cycling_cost_per_mwh,
-            )
-            if result:
-                result["date"] = date
-                arb_rows.append(result)
+        result_d = _dispatch_day(
+            forecast_prices, actual_prices,
+            n_periods, energy_out_d, energy_in_d,
+            battery.cycling_cost_per_mwh,
+        )
+        if result_d:
+            result_d["date"] = date
+            arb_rows.append(result_d)
 
     if arb_rows:
         daily_arb = pd.DataFrame(arb_rows)
@@ -512,8 +533,8 @@ def run_forecast_backtest(
     monthly["cycling_cost"]  = monthly[cost_cols].sum(axis=1) if cost_cols else 0.0
     monthly["net_revenue"]   = monthly["gross_revenue"] - monthly["cycling_cost"]
 
-    years     = len(monthly) / 12
-    net_total = monthly["net_revenue"].sum()
+    years            = len(monthly) / 12
+    net_total        = monthly["net_revenue"].sum()
     total_mwh_cycled = monthly["mwh_cycled"].sum() if "mwh_cycled" in monthly.columns else 0.0
 
     breakdown = {}
@@ -531,8 +552,8 @@ def run_forecast_backtest(
         "annualised_per_mw":  round(net_total / years / battery.power_mw, 0) if years > 0 and battery.power_mw > 0 else 0,
         "breakdown":          breakdown,
         "top_service":        max(breakdown, key=breakdown.get) if breakdown else "N/A",
-        "fr_mw":              fr_mw,
-        "arb_mw":             arb_mw,
+        "fr_mw":              avg_fr_mw,
+        "arb_mw":             avg_arb_mw,
     }
 
     return {"monthly": monthly, "summary": summary}

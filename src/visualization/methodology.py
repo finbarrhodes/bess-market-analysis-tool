@@ -39,23 +39,34 @@ st.divider()
 st.header("Two-stage participation model")
 st.markdown(
     """
-This backtester uses a simplified two-stage model to separate FR availability revenue
-from energy arbitrage revenue without double-counting the same physical capacity:
+This backtester uses a two-stage model to separate FR availability revenue from energy
+arbitrage revenue without double-counting the same physical capacity:
 
-- **Stage 1 — FR commitment:** The MW capacity committed to frequency response
-  (configured in the sidebar) holds its state of charge in a headroom band, ready to
-  discharge (High services) or charge (Low services) on demand. These units earn
-  availability payments but do not trade energy in the wholesale market.
-- **Stage 2 — Arbitrage:** The remaining MW runs daily intrinsic arbitrage independently,
-  unconstrained by FR headroom requirements.
+- **Stage 1 — Day-ahead capacity allocation:** For each day D, the model decides how
+  many MW to commit to FR services vs hold back for arbitrage. Two signals are compared
+  using information available at end of day D-1:
+    - **FR value per MW**: the confirmed clearing price for day D from the EAC day-ahead
+      auction (which clears on D-1), summed across all selected services and EFA blocks.
+      No forecasting is needed — this price is already known.
+    - **Shadow arb value per MW**: a per-unit estimate of the net arbitrage profit for
+      day D, derived from the same price forecast used for dispatch:
+      `(avg_discharge − avg_charge / η − cycling_cost) × duration_h`.
 
-The trade-off curve in the Revenue Backtester shows how total net revenue varies as the
-split changes — the optimal point represents the revenue-maximising balance between the
-two strategies at current market prices and battery parameters.
+  Capacity is then allocated proportionally:
+  `fr_fraction = fr_value / (fr_value + arb_value)`,
+  so more MW flows toward whichever stream looks more attractive on that day —
+  without all-or-nothing switching.
 
-*Remaining simplification:* SoC within the FR band is not explicitly simulated at
-half-hourly resolution. A full joint dispatch model (LP/MIP) would track SoC state
-continuously and optimise both stages simultaneously.
+- **Stage 2 — Intraday dispatch:** Within the allocated arbitrage MW, the selected
+  dispatch strategy (Perfect Foresight, Naive, or ML) schedules charge/discharge against
+  forecast prices and realises revenue against actual day-D prices.
+
+The dispatch strategy is applied consistently to both stages: the same price signal that
+drives dispatch also drives the shadow arb estimate in the allocation step.
+
+*Remaining simplification:* SoC within the FR headroom band is not explicitly simulated
+at half-hourly resolution. A full joint dispatch model (LP/MIP) would track SoC
+continuously and co-optimise both stages simultaneously — see Known Limitations below.
 """
 )
 
@@ -231,9 +242,25 @@ st.markdown(
     """
 - Intraday / day-ahead market trading (DA price data not yet integrated)
 - Balancing Mechanism (BM) direct trading
-- Battery degradation over the backtest period
 - Real-time dispatch constraints or grid connection limits
-- Half-hourly SoC simulation within the FR headroom band (planned for a future LP/MIP module)
+- Half-hourly SoC simulation within the FR headroom band (a full LP/MIP would track
+  SoC state continuously and co-optimise FR headroom and arbitrage dispatch)
+
+**Battery degradation (not yet modelled):**
+In practice, a BESS asset degrades over its operational life through two primary
+mechanisms: calendar ageing (capacity fade even at rest) and cycle ageing (accelerated
+by depth of discharge, C-rate, and temperature). A more complete model would:
+- Track state-of-health (SoH) over the backtest horizon, reducing usable capacity as
+  the asset ages.
+- Apply a degradation-aware dispatch policy that trades off short-term revenue against
+  long-term cycle-life consumption — more aggressive dispatch earns more today but
+  shortens asset life and residual value.
+- Incorporate chemistry-specific degradation curves (NMC, LFP, etc.), which have
+  materially different cycle-life profiles.
+
+The cycling wear cost parameter is a simplified financial proxy for this effect, but it
+does not capture the compounding, path-dependent nature of real battery degradation.
+This is a natural next step for a more mature model.
 """
 )
 

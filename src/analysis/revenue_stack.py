@@ -100,6 +100,7 @@ def calc_ancillary_revenue(
     end_date=None,
     min_price: float = 0.0,
     fr_mw: float = None,
+    fr_schedule: "pd.Series | None" = None,
 ) -> pd.DataFrame:
     """
     Monthly availability revenue from frequency response auctions.
@@ -112,26 +113,41 @@ def calc_ancillary_revenue(
     Parameters
     ----------
     fr_mw : float, optional
-        MW committed to FR availability. Defaults to battery.power_mw.
-        Use this to model a partial FR commitment where some capacity is
-        reserved for energy arbitrage instead.
+        Fixed MW committed to FR for all days. Ignored when fr_schedule is
+        provided. Defaults to battery.power_mw when both are None.
+    fr_schedule : pd.Series, optional
+        Per-day FR commitment (index = date, values = fr_mw). When provided,
+        each auction record is scaled by the corresponding day's fr_mw value
+        rather than a single fixed figure.
 
     Returns
     -------
     DataFrame with columns: [month (Period), service (str), revenue_gbp (float)]
     """
-    if fr_mw is None:
-        fr_mw = battery.power_mw
-
     df = _filter_dates(auctions.copy(), "EFA Date", start_date, end_date)
     df = df[df["Service"].isin(services)]
     df = df[df["Clearing Price"] >= min_price]
 
-    if df.empty or fr_mw == 0:
+    if df.empty:
         return pd.DataFrame(columns=["month", "service", "revenue_gbp"])
 
     df = df.copy()
-    df["revenue_gbp"] = df["Clearing Price"] * fr_mw * EFA_HOURS
+
+    if fr_schedule is not None:
+        sched_map = {pd.Timestamp(k).normalize(): float(v) for k, v in fr_schedule.items()}
+        df["fr_mw_d"] = (
+            df["EFA Date"].dt.normalize()
+            .map(sched_map)
+            .fillna(battery.power_mw)
+        )
+        df["revenue_gbp"] = df["Clearing Price"] * df["fr_mw_d"] * EFA_HOURS
+    else:
+        if fr_mw is None:
+            fr_mw = battery.power_mw
+        if fr_mw == 0:
+            return pd.DataFrame(columns=["month", "service", "revenue_gbp"])
+        df["revenue_gbp"] = df["Clearing Price"] * fr_mw * EFA_HOURS
+
     df["month"] = df["EFA Date"].dt.to_period("M")
 
     return (
@@ -153,6 +169,7 @@ def calc_imbalance_revenue(
     end_date=None,
     arb_mw: float = None,
     arb_energy_mwh: float = None,
+    arb_schedule: "pd.Series | None" = None,
 ) -> pd.DataFrame:
     """
     Monthly wholesale energy arbitrage revenue using a daily intrinsic model.
@@ -173,11 +190,13 @@ def calc_imbalance_revenue(
     Parameters
     ----------
     arb_mw : float, optional
-        MW available for arbitrage. Defaults to battery.power_mw.
-        Set to battery.power_mw - fr_mw when using a capacity split.
+        Fixed MW available for arbitrage. Ignored when arb_schedule is provided.
+        Defaults to battery.power_mw when both are None.
     arb_energy_mwh : float, optional
-        Usable energy (MWh) available for arbitrage. Defaults to battery.energy_mwh.
-        Set to arb_mw × battery.duration_h when using a capacity split.
+        Fixed usable energy (MWh). Ignored when arb_schedule is provided.
+    arb_schedule : pd.Series, optional
+        Per-day arb MW (index = date, values = arb_mw). When provided,
+        energy capacity is computed per day as arb_mw_d × duration_h.
 
     Returns
     -------
@@ -185,12 +204,15 @@ def calc_imbalance_revenue(
     Where imbalance_revenue_gbp is the GROSS arbitrage profit (before deducting cycling wear),
     so that the wear cost can be shown as a separate bar in the stacked chart.
     """
-    if arb_mw is None:
-        arb_mw = battery.power_mw
-    if arb_energy_mwh is None:
-        arb_energy_mwh = battery.energy_mwh
+    if arb_schedule is None:
+        if arb_mw is None:
+            arb_mw = battery.power_mw
+        if arb_energy_mwh is None:
+            arb_energy_mwh = battery.energy_mwh
+        if arb_mw == 0 or arb_energy_mwh == 0:
+            return pd.DataFrame(columns=["month", "imbalance_revenue_gbp", "cycling_cost_gbp"])
 
-    if market_index.empty or arb_mw == 0 or arb_energy_mwh == 0:
+    if market_index.empty:
         return pd.DataFrame(columns=["month", "imbalance_revenue_gbp", "cycling_cost_gbp"])
 
     # Filter to APXMIDP only — the reliable GB spot price reference
@@ -201,13 +223,24 @@ def calc_imbalance_revenue(
         return pd.DataFrame(columns=["month", "imbalance_revenue_gbp", "cycling_cost_gbp"])
 
     n_periods = max(1, int(battery.duration_h * 2))
-    energy_out = arb_energy_mwh
-    energy_in  = arb_energy_mwh / battery.efficiency_rt  # MWh purchased to store energy_out
+
+    if arb_schedule is not None:
+        arb_sched_map = {pd.Timestamp(k).normalize(): float(v) for k, v in arb_schedule.items()}
 
     rows = []
     for date, day_df in df.groupby("settlementDate"):
         if len(day_df) < n_periods * 2:
             continue
+
+        if arb_schedule is not None:
+            arb_mw_d = arb_sched_map.get(pd.Timestamp(date).normalize(), 0.0)
+            if arb_mw_d <= 0:
+                continue
+            energy_out = arb_mw_d * battery.duration_h
+            energy_in  = energy_out / battery.efficiency_rt
+        else:
+            energy_out = arb_energy_mwh
+            energy_in  = arb_energy_mwh / battery.efficiency_rt
 
         avg_charge    = day_df.nsmallest(n_periods, "price")["price"].mean()
         avg_discharge = day_df.nlargest(n_periods, "price")["price"].mean()
@@ -264,9 +297,11 @@ def run_backtest(
     start_date    : inclusive start date (str or datetime)
     end_date      : inclusive end date (str or datetime)
     fr_mw         : float, optional
-        MW committed to FR availability services. The remainder (battery.power_mw - fr_mw)
-        is available for energy arbitrage. Defaults to battery.power_mw (full FR commitment,
-        no arbitrage capacity split — same as the original single-stream model).
+        MW committed to FR availability services for the entire period. When
+        provided, a fixed split is applied — used internally by find_optimal_split.
+        When omitted (default), a day-ahead dynamic allocation is computed for each
+        day using the confirmed FR clearing price vs a perfect-foresight shadow arb
+        estimate. Falls back to full FR commitment if market_index is empty.
 
     Returns
     -------
@@ -277,15 +312,42 @@ def run_backtest(
     if services is None:
         services = ALL_SERVICES
 
-    # Resolve FR/arbitrage split
-    if fr_mw is None:
-        fr_mw = battery.power_mw
-    fr_mw = float(np.clip(fr_mw, 0, battery.power_mw))
-    arb_mw = battery.power_mw - fr_mw
-    arb_energy_mwh = arb_mw * battery.duration_h
+    # --- Resolve FR/arbitrage split ---
+    if fr_mw is not None:
+        # Fixed allocation — used by find_optimal_split and sensitivity_table
+        fr_mw     = float(np.clip(fr_mw, 0, battery.power_mw))
+        fr_sch    = None
+        arb_sch   = None
+        avg_fr_mw = fr_mw
+    else:
+        # Dynamic perfect-foresight allocation: use actual prices as the
+        # allocation signal (confirmed FR clearing price vs shadow arb value)
+        if not market_index.empty:
+            apx = market_index[market_index["dataProvider"] == "APXMIDP"].copy()
+            apx["settlementDate"] = pd.to_datetime(apx["settlementDate"]).dt.normalize()
+            apx_filt = _filter_dates(apx, "settlementDate", start_date, end_date)
+            pf_prices = {
+                date: grp.set_index("settlementPeriod")["price"]
+                for date, grp in apx_filt.groupby("settlementDate")
+            }
+            fr_sch    = compute_daily_fr_schedule(
+                auctions, pf_prices, battery, services, start_date, end_date
+            )
+            arb_sch   = (battery.power_mw - fr_sch).clip(lower=0)
+            avg_fr_mw = float(fr_sch.mean()) if len(fr_sch) > 0 else battery.power_mw
+        else:
+            # No market data: full FR commitment, no arbitrage
+            fr_mw     = battery.power_mw
+            fr_sch    = None
+            arb_sch   = None
+            avg_fr_mw = fr_mw
+    avg_arb_mw = battery.power_mw - avg_fr_mw
 
     # --- Ancillary ---
-    anc = calc_ancillary_revenue(auctions, battery, services, start_date, end_date, fr_mw=fr_mw)
+    anc = calc_ancillary_revenue(
+        auctions, battery, services, start_date, end_date,
+        fr_schedule=fr_sch, fr_mw=fr_mw if fr_sch is None else None,
+    )
     if not anc.empty:
         anc_wide = anc.pivot_table(
             index="month", columns="service", values="revenue_gbp", fill_value=0
@@ -295,10 +357,17 @@ def run_backtest(
         anc_wide = pd.DataFrame()
 
     # --- Arbitrage ---
-    imb = calc_imbalance_revenue(
-        market_index, battery, start_date, end_date,
-        arb_mw=arb_mw, arb_energy_mwh=arb_energy_mwh,
-    )
+    if arb_sch is not None:
+        imb = calc_imbalance_revenue(
+            market_index, battery, start_date, end_date, arb_schedule=arb_sch,
+        )
+    else:
+        arb_mw_fixed       = battery.power_mw - (fr_mw if fr_mw is not None else battery.power_mw)
+        arb_energy_mwh_fixed = arb_mw_fixed * battery.duration_h
+        imb = calc_imbalance_revenue(
+            market_index, battery, start_date, end_date,
+            arb_mw=arb_mw_fixed, arb_energy_mwh=arb_energy_mwh_fixed,
+        )
     if not imb.empty:
         imb_wide = imb.set_index("month")
     else:
@@ -343,8 +412,8 @@ def run_backtest(
         "annualised_per_mw":  round(net_total / years / battery.power_mw, 0) if years > 0 and battery.power_mw > 0 else 0,
         "breakdown":          breakdown,
         "top_service":        max(breakdown, key=breakdown.get) if breakdown else "N/A",
-        "fr_mw":              fr_mw,
-        "arb_mw":             arb_mw,
+        "fr_mw":   avg_fr_mw,
+        "arb_mw":  avg_arb_mw,
     }
 
     return {"monthly": monthly, "summary": summary}
@@ -361,18 +430,13 @@ def sensitivity_table(
     power_range: list = None,
     start_date=None,
     end_date=None,
-    fr_fraction: float = 1.0,
 ) -> pd.DataFrame:
     """
     Run the backtest across a range of battery sizes, holding other parameters fixed.
     Returns a DataFrame suitable for display as a summary table.
 
-    Parameters
-    ----------
-    fr_fraction : float
-        FR commitment as a fraction of power_mw (0.0–1.0). Scales with each
-        test power level so the participation split is consistent across the table.
-        Default 1.0 = full FR commitment (original behaviour).
+    Each battery size uses the dynamic day-ahead allocation model, so the
+    FR/arbitrage split is independently optimised for each size.
     """
     if power_range is None:
         power_range = [10, 25, 50, 100, 200]
@@ -385,11 +449,9 @@ def sensitivity_table(
             efficiency_rt=base_spec.efficiency_rt,
             cycling_cost_per_mwh=base_spec.cycling_cost_per_mwh,
         )
-        fr_mw_for_spec = fr_fraction * mw
         result = run_backtest(
             auctions, market_index, spec,
             start_date=start_date, end_date=end_date,
-            fr_mw=fr_mw_for_spec,
         )
         s = result["summary"]
         rows.append({
@@ -463,3 +525,101 @@ def find_optimal_split(
     optimal_fr_mw = float(trade_off_df.loc[best_idx, "fr_mw"])
 
     return optimal_fr_mw, trade_off_df
+
+
+# ---------------------------------------------------------------------------
+# Day-ahead FR/arbitrage capacity allocator
+# ---------------------------------------------------------------------------
+
+def compute_daily_fr_schedule(
+    auctions: pd.DataFrame,
+    forecast_prices_by_date: dict,
+    battery: BatterySpec,
+    services: list = None,
+    start_date=None,
+    end_date=None,
+) -> pd.Series:
+    """
+    Day-ahead FR/arbitrage capacity allocation optimiser.
+
+    For each day D with an entry in forecast_prices_by_date, compares:
+
+    FR value per MW (£/MW/day):
+        Sum of clearing prices × EFA_HOURS across all selected services for
+        that EFA date. EAC runs daily day-ahead auctions, so clearing prices
+        for day D are known by end of day D-1 — no look-ahead bias.
+
+    Shadow arb value per MW (£/MW/day):
+        Estimated net profit from one full arbitrage cycle using forecast prices:
+        (avg_discharge − avg_charge / η − cycling_cost) × duration_h.
+        This is a per-unit (1 MW) estimate; since arbitrage revenue scales
+        linearly with MW, only the per-MW rate is needed for the comparison.
+
+    Allocation rule (proportional):
+        fr_fraction = fr_value / (fr_value + arb_value)
+
+    Capacity flows toward whichever stream looks more attractive on that day
+    without all-or-nothing switching. Days where arb is unprofitable
+    (arb_value = 0) receive full FR commitment.
+
+    Parameters
+    ----------
+    forecast_prices_by_date : dict
+        {date: pd.Series(index=settlementPeriod, values=price)} — the price
+        signal for the shadow arb estimate. Pass actual day-D prices for
+        perfect-foresight allocation; D-1 prices or ML predictions for
+        realistic day-ahead allocation.
+    battery : BatterySpec
+    services : list of FR service codes to include (default: ALL_SERVICES)
+    start_date, end_date : applied to auctions filter only
+
+    Returns
+    -------
+    pd.Series indexed by pd.Timestamp (normalised to midnight), values = fr_mw.
+    """
+    if services is None:
+        services = ALL_SERVICES
+
+    # Daily FR value per MW from confirmed auction clearing prices.
+    # EAC clearing prices are for the service delivery date and are determined
+    # in the day-ahead auction — used directly with no lag.
+    df_a = _filter_dates(auctions.copy(), "EFA Date", start_date, end_date)
+    df_a = df_a[df_a["Service"].isin(services)]
+    df_a = df_a[df_a["Clearing Price"] >= 0.0]
+
+    if not df_a.empty:
+        daily_fr_value = (
+            df_a.groupby("EFA Date")["Clearing Price"]
+            .apply(lambda x: (x * EFA_HOURS).sum())
+        )
+        daily_fr_value.index = pd.DatetimeIndex(daily_fr_value.index).normalize()
+    else:
+        daily_fr_value = pd.Series(dtype=float)
+
+    n_periods = max(1, int(battery.duration_h * 2))
+    schedule  = {}
+
+    for date, forecast_prices in forecast_prices_by_date.items():
+        date_ts = pd.Timestamp(date).normalize()
+
+        # FR value per MW: confirmed clearing price for this day
+        fr_value = float(daily_fr_value.get(date_ts, 0.0))
+
+        # Shadow arb value per MW: estimated net profit from one cycle
+        if len(forecast_prices) >= n_periods * 2:
+            avg_discharge = forecast_prices.nlargest(n_periods).mean()
+            avg_charge    = forecast_prices.nsmallest(n_periods).mean()
+            net_per_mw = (
+                avg_discharge
+                - avg_charge / battery.efficiency_rt
+                - battery.cycling_cost_per_mwh
+            ) * battery.duration_h
+            arb_value = max(0.0, net_per_mw)
+        else:
+            arb_value = 0.0
+
+        total       = fr_value + arb_value
+        fr_fraction = (fr_value / total) if total > 0 else 1.0
+        schedule[date_ts] = fr_fraction * battery.power_mw
+
+    return pd.Series(schedule, name="fr_mw")

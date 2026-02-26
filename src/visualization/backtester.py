@@ -1,5 +1,5 @@
 """
-BESS Tolling Value Backtester
+BESS Revenue Backtester
 ==============================
 Launched as a page via app.py (st.navigation).
 Can still be run standalone for local development:
@@ -21,7 +21,6 @@ from src.analysis.revenue_stack import (
     BatterySpec,
     run_backtest,
     sensitivity_table,
-    find_optimal_split,
     ALL_SERVICES,
     SERVICE_LABELS,
     SERVICE_COLOURS,
@@ -39,7 +38,7 @@ from src.analysis.price_forecast import (
 # ---------------------------------------------------------------------------
 try:
     st.set_page_config(
-        page_title="BESS Tolling Value Backtester",
+        page_title="BESS Revenue Backtester",
         page_icon="🔋",
         layout="wide",
     )
@@ -120,31 +119,6 @@ availability_pct = st.sidebar.slider(
         "GB BESS fleet availability (Modo Energy, 'GB Battery Storage Report', 2024)."
     ),
 )
-
-st.sidebar.divider()
-st.sidebar.subheader("Market Participation")
-
-fr_mw = st.sidebar.slider(
-    "MW committed to FR availability",
-    min_value=0,
-    max_value=power_mw,
-    value=power_mw,
-    step=1,
-    help=(
-        "Capacity committed to frequency response (FR) availability services. "
-        "The remaining MW is available for energy arbitrage. "
-        "FR-committed units hold their SoC position for frequency response "
-        "and cannot simultaneously trade energy."
-    ),
-)
-arb_mw = power_mw - fr_mw
-
-if fr_mw == power_mw:
-    st.sidebar.caption("→ All capacity committed to FR; no arbitrage.")
-elif fr_mw == 0:
-    st.sidebar.caption("→ No FR commitment; all capacity for arbitrage.")
-else:
-    st.sidebar.caption(f"→ {fr_mw} MW → FR availability | {arb_mw} MW → arbitrage")
 
 st.sidebar.divider()
 st.sidebar.subheader("Services to Include")
@@ -235,60 +209,25 @@ if auctions.empty:
     st.error("No auction data found. Run scripts/prepare_data.py first.")
     st.stop()
 
-# Compute optimal split (cached — reruns only when parameters change)
-@st.cache_data
-def _cached_optimal_split(
-    power_mw, duration_h, efficiency_rt, cycling_cost_per_mwh, availability_factor,
-    services_key, start_date, end_date,
-):
-    """Thin cache wrapper for find_optimal_split (hashable args only)."""
-    _battery = BatterySpec(
-        power_mw=power_mw,
-        duration_h=duration_h,
-        efficiency_rt=efficiency_rt,
-        cycling_cost_per_mwh=cycling_cost_per_mwh,
-        availability_factor=availability_factor,
-    )
-    _mi = load_market_index() if include_imbalance else pd.DataFrame()
-    return find_optimal_split(
-        load_auctions(), _mi, _battery,
-        services=list(services_key),
-        start_date=start_date,
-        end_date=end_date,
-    )
-
-optimal_fr_mw, trade_off_df = _cached_optimal_split(
-    power_mw, duration_h, efficiency_pct / 100, cycling_cost, availability_pct / 100,
-    tuple(sorted(selected_services)), start_date, end_date,
-)
-
-# Show optimal marker below the FR slider
-st.sidebar.caption(
-    f"ℹ Optimal split: **{optimal_fr_mw:.0f} MW** to FR "
-    f"(maximises net revenue at current parameters)"
-)
 
 # Run the primary backtest for the selected strategy
 if dispatch_strategy == "Perfect Foresight":
     result = run_backtest(
-        auctions, mi_input, battery, selected_services, start_date, end_date, fr_mw=fr_mw
+        auctions, mi_input, battery, selected_services, start_date, end_date,
     )
     # Add total_mwh_cycled to summary for the comparison chart
     if result["monthly"] is not None and not result["monthly"].empty:
-        cyc_col = result["monthly"].get("cycling_cost_gbp", result["monthly"].get("cycling_cost", None))
-        mwh_cycled = 0.0
-        if cyc_col is not None:
-            mwh_cycled = float(
-                (result["monthly"]["cycling_cost_gbp"] / battery.cycling_cost_per_mwh).sum()
-                if "cycling_cost_gbp" in result["monthly"].columns and battery.cycling_cost_per_mwh > 0
-                else 0.0
-            )
+        mwh_cycled = float(
+            (result["monthly"]["cycling_cost_gbp"] / battery.cycling_cost_per_mwh).sum()
+            if "cycling_cost_gbp" in result["monthly"].columns and battery.cycling_cost_per_mwh > 0
+            else 0.0
+        )
         result["summary"]["total_mwh_cycled"] = round(mwh_cycled, 1)
 
 elif dispatch_strategy == "Naive (D-1 prices)":
     if not include_imbalance:
         result = run_backtest(
-            auctions, pd.DataFrame(), battery, selected_services, start_date, end_date, fr_mw=fr_mw
+            auctions, pd.DataFrame(), battery, selected_services, start_date, end_date,
         )
         result["summary"]["total_mwh_cycled"] = 0.0
     else:
@@ -300,13 +239,12 @@ elif dispatch_strategy == "Naive (D-1 prices)":
             services=selected_services,
             start_date=start_date,
             end_date=end_date,
-            fr_mw=fr_mw,
         )
 
 else:  # ML Model
     if not include_imbalance:
         result = run_backtest(
-            auctions, pd.DataFrame(), battery, selected_services, start_date, end_date, fr_mw=fr_mw
+            auctions, pd.DataFrame(), battery, selected_services, start_date, end_date,
         )
         result["summary"]["total_mwh_cycled"] = 0.0
     else:
@@ -320,7 +258,6 @@ else:  # ML Model
             services=selected_services,
             start_date=start_date,
             end_date=end_date,
-            fr_mw=fr_mw,
             model=_model,
             feature_df=_feature_df,
             feature_cols=_feature_cols,
@@ -333,7 +270,7 @@ summary = result["summary"]
 # Header
 # ---------------------------------------------------------------------------
 
-st.title("BESS Tolling Value Backtester")
+st.title("BESS Revenue Backtester")
 st.markdown(
     f"Modelling a **{power_mw} MW / {power_mw * duration_h:.0f} MWh** battery "
     f"({duration_h}h duration, {efficiency_pct}% round-trip efficiency) "
@@ -372,8 +309,9 @@ with tab_results:
             SERVICE_LABELS.get(summary.get("top_service", ""), summary.get("top_service", "N/A")),
         )
         c5.metric(
-            "Capacity Split",
-            f"{fr_mw} MW FR / {arb_mw} MW arb",
+            "Avg Capacity Split",
+            f"{summary.get('fr_mw', 0):.0f} MW FR / {summary.get('arb_mw', 0):.0f} MW arb",
+            help="Average daily FR/arb allocation over the backtest period.",
         )
     else:
         st.warning("No results — check that services are selected and data covers the chosen period.")
@@ -423,54 +361,6 @@ with tab_results:
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         )
         st.plotly_chart(fig, use_container_width=True)
-
-    # FR / Arbitrage trade-off curve
-    if not trade_off_df.empty and power_mw > 1:
-        with st.expander("FR / Arbitrage trade-off curve", expanded=True):
-            st.caption(
-                "Total net revenue across the backtest period as a function of how much "
-                "capacity is committed to FR availability vs energy arbitrage. "
-                "The green marker shows the revenue-maximising split at current parameters."
-            )
-
-            fig_tradeoff = go.Figure()
-
-            fig_tradeoff.add_trace(go.Scatter(
-                x=trade_off_df["fr_mw"],
-                y=trade_off_df["total_net_gbp"] / 1_000,
-                mode="lines",
-                name="Total net revenue",
-                line=dict(color="#0D7680", width=2.5),
-            ))
-
-            fig_tradeoff.add_vline(
-                x=fr_mw,
-                line_dash="dash",
-                line_color="#8B2020",
-                annotation_text=f"Current: {fr_mw} MW",
-                annotation_position="top right",
-                annotation_font_color="#8B2020",
-            )
-
-            optimal_row = trade_off_df.loc[trade_off_df["fr_mw"] == optimal_fr_mw]
-            if not optimal_row.empty:
-                fig_tradeoff.add_trace(go.Scatter(
-                    x=optimal_row["fr_mw"],
-                    y=optimal_row["total_net_gbp"] / 1_000,
-                    mode="markers",
-                    name=f"Optimal: {optimal_fr_mw:.0f} MW to FR",
-                    marker=dict(symbol="star", size=14, color="#4E8A3C"),
-                ))
-
-            fig_tradeoff.update_layout(
-                height=340,
-                template="plotly_white", paper_bgcolor="#FFF1E5", plot_bgcolor="#FFF1E5",
-                xaxis_title="MW committed to FR availability",
-                yaxis_title="Total net revenue (£k)",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                margin=dict(t=40),
-            )
-            st.plotly_chart(fig_tradeoff, use_container_width=True)
 
     # Cumulative revenue | Revenue breakdown pie
     left, right = st.columns([2, 1])
@@ -532,7 +422,7 @@ with tab_strategy:
 
             # --- Perfect Foresight ---
             pf_result = run_backtest(
-                auctions, mi_input, battery, selected_services, start_date, end_date, fr_mw=fr_mw
+                auctions, mi_input, battery, selected_services, start_date, end_date,
             )
             pf_summary = pf_result["summary"]
             pf_mwh = 0.0
@@ -551,7 +441,6 @@ with tab_strategy:
                 services=selected_services,
                 start_date=start_date,
                 end_date=end_date,
-                fr_mw=fr_mw,
             )
 
             # --- ML ---
@@ -567,7 +456,6 @@ with tab_strategy:
                 services=selected_services,
                 start_date=start_date,
                 end_date=end_date,
-                fr_mw=fr_mw,
                 model=_cmp_model,
                 feature_df=_cmp_feat_df,
                 feature_cols=_cmp_feat_cols,
@@ -701,7 +589,6 @@ with tab_sensitivity:
         power_range=[5, 10, 25, 50, 100, 200],
         start_date=start_date,
         end_date=end_date,
-        fr_fraction=fr_mw / power_mw if power_mw > 0 else 1.0,
     )
 
     st.dataframe(
