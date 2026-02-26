@@ -20,8 +20,10 @@ st.set_page_config(
 )
 
 pages = [
-    st.Page("src/visualization/dashboard.py",  title="Market Dashboard"),
-    st.Page("src/visualization/backtester.py", title="Revenue Backtester"),
+    st.Page("src/visualization/home.py",        title="Home"),
+    st.Page("src/visualization/dashboard.py",   title="Market Overview"),
+    st.Page("src/visualization/backtester.py",  title="Revenue Backtester"),
+    st.Page("src/visualization/methodology.py", title="Methodology & Data"),
 ]
 
 pg = st.navigation(pages)

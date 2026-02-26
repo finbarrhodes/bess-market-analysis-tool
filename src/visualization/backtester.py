@@ -341,222 +341,185 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Top-level metrics
+# Content tabs
 # ---------------------------------------------------------------------------
 
-if summary:
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric(
-        "Total Net Revenue",
-        f"£{summary['total_net'] / 1_000:,.0f}k",
-    )
-    c2.metric(
-        "Annualised Net Revenue",
-        f"£{summary['annualised_net'] / 1_000:,.0f}k / yr",
-    )
-    c3.metric(
-        "Revenue per MW",
-        f"£{summary['annualised_per_mw'] / 1_000:,.1f}k / MW / yr",
-    )
-    c4.metric(
-        "Top Revenue Stream",
-        SERVICE_LABELS.get(summary.get("top_service", ""), summary.get("top_service", "N/A")),
-    )
-    c5.metric(
-        "Capacity Split",
-        f"{fr_mw} MW FR / {arb_mw} MW arb",
-    )
-else:
-    st.warning("No results — check that services are selected and data covers the chosen period.")
-    st.stop()
-
-st.divider()
+tab_results, tab_strategy, tab_sensitivity = st.tabs(
+    ["Results", "Strategy Comparison", "Sensitivity"]
+)
 
 # ---------------------------------------------------------------------------
-# Chart 1: Monthly stacked bar — revenue by stream + cycling cost deduction
+# Tab: Results
 # ---------------------------------------------------------------------------
 
-if not monthly.empty:
-    st.subheader("Monthly Revenue Stack")
-
-    fig = go.Figure()
-
-    # Revenue streams (positive bars)
-    stream_cols = {
-        **{f"{s}_rev": s for s in ALL_SERVICES},
-        "imbalance_revenue_gbp": "Imbalance",
-    }
-
-    for col, label in stream_cols.items():
-        if col not in monthly.columns:
-            continue
-        if monthly[col].sum() == 0:
-            continue
-        display_label = SERVICE_LABELS.get(label, label)
-        fig.add_trace(go.Bar(
-            x=monthly["month_dt"],
-            y=monthly[col] / 1_000,
-            name=display_label,
-            marker_color=SERVICE_COLOURS.get(label, "#888"),
-        ))
-
-    # Cycling cost (negative bar)
-    if "cycling_cost_gbp" in monthly.columns and monthly["cycling_cost_gbp"].sum() > 0:
-        fig.add_trace(go.Bar(
-            x=monthly["month_dt"],
-            y=-monthly["cycling_cost_gbp"] / 1_000,
-            name="Cycling wear cost",
-            marker_color=SERVICE_COLOURS["Cycling cost"],
-            opacity=0.8,
-        ))
-
-    fig.update_layout(
-        barmode="relative",
-        height=450,
-        template="plotly_white",
-        yaxis_title="£k",
-        xaxis_title="Month",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ---------------------------------------------------------------------------
-# Chart 2: FR / Arbitrage trade-off curve
-# ---------------------------------------------------------------------------
-
-if not trade_off_df.empty and power_mw > 1:
-    with st.expander("FR / Arbitrage trade-off curve", expanded=True):
-        st.caption(
-            "Total net revenue across the backtest period as a function of how much "
-            "capacity is committed to FR availability vs energy arbitrage. "
-            "The green marker shows the revenue-maximising split at current parameters."
+with tab_results:
+    if summary:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric(
+            "Total Net Revenue",
+            f"£{summary['total_net'] / 1_000:,.0f}k",
         )
-
-        fig_tradeoff = go.Figure()
-
-        # Main curve
-        fig_tradeoff.add_trace(go.Scatter(
-            x=trade_off_df["fr_mw"],
-            y=trade_off_df["total_net_gbp"] / 1_000,
-            mode="lines",
-            name="Total net revenue",
-            line=dict(color="#1f77b4", width=2.5),
-        ))
-
-        # Current slider position (vertical dashed line)
-        fig_tradeoff.add_vline(
-            x=fr_mw,
-            line_dash="dash",
-            line_color="#d62728",
-            annotation_text=f"Current: {fr_mw} MW",
-            annotation_position="top right",
-            annotation_font_color="#d62728",
+        c2.metric(
+            "Annualised Net Revenue",
+            f"£{summary['annualised_net'] / 1_000:,.0f}k / yr",
         )
+        c3.metric(
+            "Revenue per MW",
+            f"£{summary['annualised_per_mw'] / 1_000:,.1f}k / MW / yr",
+        )
+        c4.metric(
+            "Top Revenue Stream",
+            SERVICE_LABELS.get(summary.get("top_service", ""), summary.get("top_service", "N/A")),
+        )
+        c5.metric(
+            "Capacity Split",
+            f"{fr_mw} MW FR / {arb_mw} MW arb",
+        )
+    else:
+        st.warning("No results — check that services are selected and data covers the chosen period.")
+        st.stop()
 
-        # Optimal point (green star marker)
-        optimal_row = trade_off_df.loc[trade_off_df["fr_mw"] == optimal_fr_mw]
-        if not optimal_row.empty:
-            fig_tradeoff.add_trace(go.Scatter(
-                x=optimal_row["fr_mw"],
-                y=optimal_row["total_net_gbp"] / 1_000,
-                mode="markers",
-                name=f"Optimal: {optimal_fr_mw:.0f} MW to FR",
-                marker=dict(symbol="star", size=14, color="#2ca02c"),
+    st.divider()
+
+    # Monthly stacked bar — revenue by stream + cycling cost deduction
+    if not monthly.empty:
+        st.subheader("Monthly Revenue Stack")
+
+        fig = go.Figure()
+
+        stream_cols = {
+            **{f"{s}_rev": s for s in ALL_SERVICES},
+            "imbalance_revenue_gbp": "Imbalance",
+        }
+
+        for col, label in stream_cols.items():
+            if col not in monthly.columns:
+                continue
+            if monthly[col].sum() == 0:
+                continue
+            display_label = SERVICE_LABELS.get(label, label)
+            fig.add_trace(go.Bar(
+                x=monthly["month_dt"],
+                y=monthly[col] / 1_000,
+                name=display_label,
+                marker_color=SERVICE_COLOURS.get(label, "#888"),
             ))
 
-        fig_tradeoff.update_layout(
-            height=340,
+        if "cycling_cost_gbp" in monthly.columns and monthly["cycling_cost_gbp"].sum() > 0:
+            fig.add_trace(go.Bar(
+                x=monthly["month_dt"],
+                y=-monthly["cycling_cost_gbp"] / 1_000,
+                name="Cycling wear cost",
+                marker_color=SERVICE_COLOURS["Cycling cost"],
+                opacity=0.8,
+            ))
+
+        fig.update_layout(
+            barmode="relative",
+            height=450,
             template="plotly_white",
-            xaxis_title="MW committed to FR availability",
-            yaxis_title="Total net revenue (£k)",
+            yaxis_title="£k",
+            xaxis_title="Month",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            margin=dict(t=40),
         )
-        st.plotly_chart(fig_tradeoff, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-# ---------------------------------------------------------------------------
-# Charts 3a + 3b: Cumulative revenue | Revenue breakdown pie
-# ---------------------------------------------------------------------------
+    # FR / Arbitrage trade-off curve
+    if not trade_off_df.empty and power_mw > 1:
+        with st.expander("FR / Arbitrage trade-off curve", expanded=True):
+            st.caption(
+                "Total net revenue across the backtest period as a function of how much "
+                "capacity is committed to FR availability vs energy arbitrage. "
+                "The green marker shows the revenue-maximising split at current parameters."
+            )
 
-left, right = st.columns([2, 1])
+            fig_tradeoff = go.Figure()
 
-with left:
-    st.subheader("Cumulative Net Revenue")
-    monthly_sorted = monthly.sort_values("month_dt")
-    monthly_sorted["cumulative_net"] = monthly_sorted["net_revenue"].cumsum()
+            fig_tradeoff.add_trace(go.Scatter(
+                x=trade_off_df["fr_mw"],
+                y=trade_off_df["total_net_gbp"] / 1_000,
+                mode="lines",
+                name="Total net revenue",
+                line=dict(color="#1f77b4", width=2.5),
+            ))
 
-    fig2 = go.Figure(go.Scatter(
-        x=monthly_sorted["month_dt"],
-        y=monthly_sorted["cumulative_net"] / 1_000,
-        mode="lines",
-        fill="tozeroy",
-        line=dict(color="#1f77b4", width=2),
-        fillcolor="rgba(31,119,180,0.15)",
-    ))
-    fig2.update_layout(
-        height=380,
-        template="plotly_white",
-        yaxis_title="£k",
-        xaxis_title="Month",
-    )
-    st.plotly_chart(fig2, use_container_width=True)
+            fig_tradeoff.add_vline(
+                x=fr_mw,
+                line_dash="dash",
+                line_color="#d62728",
+                annotation_text=f"Current: {fr_mw} MW",
+                annotation_position="top right",
+                annotation_font_color="#d62728",
+            )
 
-with right:
-    st.subheader("Revenue Breakdown")
-    bd = summary.get("breakdown", {})
-    if bd:
-        labels = [SERVICE_LABELS.get(k, k) for k in bd.keys()]
-        values = list(bd.values())
-        colours = [SERVICE_COLOURS.get(k, "#888") for k in bd.keys()]
+            optimal_row = trade_off_df.loc[trade_off_df["fr_mw"] == optimal_fr_mw]
+            if not optimal_row.empty:
+                fig_tradeoff.add_trace(go.Scatter(
+                    x=optimal_row["fr_mw"],
+                    y=optimal_row["total_net_gbp"] / 1_000,
+                    mode="markers",
+                    name=f"Optimal: {optimal_fr_mw:.0f} MW to FR",
+                    marker=dict(symbol="star", size=14, color="#2ca02c"),
+                ))
 
-        fig3 = go.Figure(go.Pie(
-            labels=labels,
-            values=values,
-            marker_colors=colours,
-            hole=0.45,
-            textinfo="label+percent",
-            hovertemplate="%{label}: £%{value:,.0f}<extra></extra>",
+            fig_tradeoff.update_layout(
+                height=340,
+                template="plotly_white",
+                xaxis_title="MW committed to FR availability",
+                yaxis_title="Total net revenue (£k)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                margin=dict(t=40),
+            )
+            st.plotly_chart(fig_tradeoff, use_container_width=True)
+
+    # Cumulative revenue | Revenue breakdown pie
+    left, right = st.columns([2, 1])
+
+    with left:
+        st.subheader("Cumulative Net Revenue")
+        monthly_sorted = monthly.sort_values("month_dt")
+        monthly_sorted["cumulative_net"] = monthly_sorted["net_revenue"].cumsum()
+
+        fig2 = go.Figure(go.Scatter(
+            x=monthly_sorted["month_dt"],
+            y=monthly_sorted["cumulative_net"] / 1_000,
+            mode="lines",
+            fill="tozeroy",
+            line=dict(color="#1f77b4", width=2),
+            fillcolor="rgba(31,119,180,0.15)",
         ))
-        fig3.update_layout(height=380, showlegend=False, margin=dict(t=20, b=20))
-        st.plotly_chart(fig3, use_container_width=True)
+        fig2.update_layout(
+            height=380,
+            template="plotly_white",
+            yaxis_title="£k",
+            xaxis_title="Month",
+        )
+        st.plotly_chart(fig2, use_container_width=True)
 
-st.divider()
+    with right:
+        st.subheader("Revenue Breakdown")
+        bd = summary.get("breakdown", {})
+        if bd:
+            labels = [SERVICE_LABELS.get(k, k) for k in bd.keys()]
+            values = list(bd.values())
+            colours = [SERVICE_COLOURS.get(k, "#888") for k in bd.keys()]
 
-# ---------------------------------------------------------------------------
-# Sensitivity table
-# ---------------------------------------------------------------------------
-
-st.subheader("Sensitivity: Revenue by Battery Size")
-st.caption("Other parameters held constant at sidebar values.")
-
-sens_df = sensitivity_table(
-    auctions,
-    mi_input,
-    battery,
-    power_range=[5, 10, 25, 50, 100, 200],
-    start_date=start_date,
-    end_date=end_date,
-    fr_fraction=fr_mw / power_mw if power_mw > 0 else 1.0,
-)
-
-st.dataframe(
-    sens_df.style.format({
-        "Energy (MWh)":             "{:.0f}",
-        "Total Net Revenue (£k)":   "{:,.1f}",
-        "Ann. Net Revenue (£k/yr)": "{:,.1f}",
-        "Revenue / MW (£k/MW/yr)":  "{:,.1f}",
-    }),
-    use_container_width=True,
-    hide_index=True,
-)
-
-st.divider()
+            fig3 = go.Figure(go.Pie(
+                labels=labels,
+                values=values,
+                marker_colors=colours,
+                hole=0.45,
+                textinfo="label+percent",
+                hovertemplate="%{label}: £%{value:,.0f}<extra></extra>",
+            ))
+            fig3.update_layout(height=380, showlegend=False, margin=dict(t=20, b=20))
+            st.plotly_chart(fig3, use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Strategy comparison: Revenue / Cycling tradeoff
+# Tab: Strategy Comparison
 # ---------------------------------------------------------------------------
 
-with st.expander("Dispatch Strategy Comparison — Revenue vs. Cycling Tradeoff", expanded=True):
+with tab_strategy:
     st.caption(
         "Each point shows total net revenue against total MWh cycled over the backtest period "
         "for one dispatch strategy. A strategy that sits higher and to the left earns more "
@@ -661,126 +624,12 @@ with st.expander("Dispatch Strategy Comparison — Revenue vs. Cycling Tradeoff"
             "**Capture rate** = realised net revenue ÷ perfect-foresight net revenue. "
             "Reflects how much of the theoretical revenue ceiling each strategy achieves."
         )
-    else:
-        st.info("Enable 'Include imbalance arbitrage' to see the strategy comparison.")
 
-st.divider()
-
-# ---------------------------------------------------------------------------
-# Methodology notes (collapsible)
-# ---------------------------------------------------------------------------
-
-with st.expander("Methodology & Assumptions"):
-    arb_energy_mwh = arb_mw * duration_h
-    st.markdown(f"""
-**Two-stage participation model**
-
-This backtester uses a simplified two-stage model to separate FR availability revenue
-from energy arbitrage revenue without double-counting the same physical capacity:
-
-- **Stage 1 — FR commitment ({fr_mw} MW):** Capacity committed to frequency response
-  holds its state of charge in a headroom band, ready to discharge (High services) or
-  charge (Low services) on demand. These units earn availability payments but do not
-  trade energy in the wholesale market.
-- **Stage 2 — Arbitrage ({arb_mw} MW):** Remaining capacity runs daily intrinsic
-  arbitrage independently, unconstrained by FR headroom requirements.
-
-The trade-off curve above shows how total net revenue varies as the split changes —
-the optimal point represents the revenue-maximising balance between the two strategies
-at current market prices and battery parameters.
-
-*Remaining simplification:* SoC within the FR band is not explicitly simulated at
-half-hourly resolution. A full joint dispatch model (LP/MIP) would track SoC state
-continuously and optimise both stages simultaneously.
-
----
-
-**Dispatch strategies**
-
-The arbitrage schedule is derived from a price signal for day D. Three signals are available:
-
-- **Perfect Foresight**: the optimizer receives the actual day-D APXMIDP prices and picks
-  the true optimal charge/discharge windows. This is the revenue ceiling — it is not
-  achievable in practice but provides a useful benchmark.
-- **Naive (D-1 prices)**: at the end of day D-1, yesterday's actual prices are used as
-  the forecast for day D. The schedule is derived from this forecast, then evaluated
-  against actual day-D prices to compute realised revenue. This is the zero-skill floor —
-  any useful model should outperform it.
-- **ML Model**: a machine learning model trained on historical data predicts day-D prices
-  using features available at end of day D-1 (lagged prices, generation mix, seasonality).
-  The predicted prices drive the same dispatch logic; realised revenue is computed against
-  actual prices. See the ML model section below for details.
-
-The **capture rate** (realised revenue ÷ perfect-foresight revenue) summarises how much
-of the theoretical ceiling each strategy achieves. The **revenue/cycling tradeoff chart**
-above shows the efficiency of each strategy: a better strategy earns more revenue while
-consuming less cycle life.
-
----
-
-**Ancillary service availability revenue**
-- Revenue = `clearing_price (£/MW/h) × {fr_mw} MW committed to FR × 4 hours per EFA block`
-- Services of different response speeds (DC, DR, DM) can be stacked on the same physical MW
-  in the GB market — each earns a separate availability payment.
-- High (discharge) and Low (charge) services are modelled as independent and simultaneous,
-  assuming the battery maintains sufficient SoC headroom to respond in both directions.
-- Clearing prices sourced from NESO Data Portal (legacy DC/DR/DM auctions Sep 2021–Nov 2023,
-  EAC service Nov 2023–present).
-- Ancillary revenue is identical across all three dispatch strategies — it does not depend
-  on price forecasting.
-
-**Wholesale energy arbitrage revenue**
-- One arbitrage cycle per day maximum, using the **{arb_mw} MW** available for arbitrage.
-- Charge in the **{int(duration_h * 2)} cheapest** settlement periods; discharge in the
-  **{int(duration_h * 2)} most expensive** periods.
-- Gross profit = `avg_discharge_price × {arb_energy_mwh:.0f} MWh`
-  − `avg_charge_price × {arb_energy_mwh / (efficiency_pct / 100):.1f} MWh`
-  (extra input energy needed to account for {100 - efficiency_pct}% round-trip losses).
-- Cycle only executed on days where realised gross profit exceeds the cycling wear cost.
-- **Price reference: APXMIDP market index** (APX Power UK) from Elexon Insights
-  (Jul 2023–present). This is the actual GB spot settlement reference price, giving a
-  materially more realistic daily spread than the imbalance settlement price (SSP),
-  which can reach extreme negative values during high-renewable periods and would
-  otherwise inflate arbitrage revenue by ~77%.
-
-**Availability factor ({availability_pct}%)**
-- Applied as a uniform multiplier to all revenue streams and cycling costs.
-- Models periods where the asset is unavailable due to planned maintenance, unplanned
-  faults, grid curtailment, or service delivery failures.
-- Default of 95% reflects the minimum availability threshold mandated in NESO's Dynamic
-  Containment and Enduring Auction Capability service specifications. This is also
-  consistent with observed GB BESS fleet performance: Modo Energy's *GB Battery Storage
-  Report* (2024) reports median fleet availability of 95–97% across contracted windows.
-
-**Cycling wear cost and battery degradation**
-- Applied to imbalance arbitrage trades only: `{cycling_cost} £/MWh × MWh discharged per trade`.
-- Ancillary service cycling (energy delivered during frequency events) is not separately
-  modelled — it is minor relative to availability payments and is typically compensated
-  via the service contract.
-- *Why cycling matters beyond cost:* lithium-ion cells degrade through two primary
-  mechanisms that accelerate with use — SEI (solid electrolyte interphase) layer growth,
-  which consumes cyclable lithium irreversibly, and lithium plating at the anode, which
-  increases with deeper discharge and higher charge rates. Each MWh cycled consumes a
-  small fraction of the cell's finite cycle life. The `cycling_cost_per_mwh` parameter
-  is a financial proxy for this physical degradation: more aggressive dispatch earns
-  more revenue in the short run but consumes cycle life faster, reducing the asset's
-  useful life and residual value. This is why the revenue/cycling tradeoff chart is the
-  core output of the strategy comparison, not revenue alone.
-
-**What this model does not capture**
-- Intraday / day-ahead market trading (DA price data not yet integrated)
-- Balancing Mechanism (BM) direct trading
-- Battery degradation over the backtest period
-- Real-time dispatch constraints or grid connection limits
-- Half-hourly SoC simulation within the FR headroom band (planned for a future LP/MIP module)
-    """)
-
-    if dispatch_strategy == "ML Model" and include_imbalance:
-        model_label = "Random Forest" if ml_model_type == "rf" else "XGBoost"
-        st.markdown("---")
-        st.markdown(f"**ML price forecast model ({model_label})**")
-
-        st.markdown(f"""
+        # ML model detail — shown when ML strategy is selected
+        if dispatch_strategy == "ML Model":
+            st.divider()
+            st.subheader(f"ML Model Detail — {model_label}")
+            st.markdown(f"""
 The ML strategy uses a **{model_label}** regressor to predict the 48 half-hourly APXMIDP
 prices for day D using features available at the end of day D-1.
 
@@ -807,30 +656,61 @@ future prices during training.
 **Known limitations:** tree-based models cannot extrapolate beyond the price ranges seen
 during training; electricity price forecasting is inherently noisy; and the model improves
 dispatch quality on average but does not eliminate forecast error on individual days.
-        """)
+            """)
 
-        # Show model metrics and feature importances
-        with st.spinner("Loading model metrics…"):
-            _model_exp, _, _feat_cols_exp, _train_m, _test_m = load_forecast_model(ml_model_type)
+            with st.spinner("Loading model metrics…"):
+                _model_exp, _, _feat_cols_exp, _train_m, _test_m = load_forecast_model(ml_model_type)
 
-        col_a, col_b = st.columns(2)
-        col_a.metric("Train RMSE (£/MWh)", f"{_train_m['rmse']:.2f}", help=f"n = {_train_m['n_samples']:,} periods")
-        col_b.metric("Test RMSE (£/MWh)",  f"{_test_m['rmse']:.2f}",  help=f"n = {_test_m['n_samples']:,} periods (held-out, after {DEFAULT_TEST_START})")
-        col_a.metric("Train MAE (£/MWh)",  f"{_train_m['mae']:.2f}")
-        col_b.metric("Test MAE (£/MWh)",   f"{_test_m['mae']:.2f}")
+            col_a, col_b = st.columns(2)
+            col_a.metric("Train RMSE (£/MWh)", f"{_train_m['rmse']:.2f}", help=f"n = {_train_m['n_samples']:,} periods")
+            col_b.metric("Test RMSE (£/MWh)",  f"{_test_m['rmse']:.2f}",  help=f"n = {_test_m['n_samples']:,} periods (held-out, after {DEFAULT_TEST_START})")
+            col_a.metric("Train MAE (£/MWh)",  f"{_train_m['mae']:.2f}")
+            col_b.metric("Test MAE (£/MWh)",   f"{_test_m['mae']:.2f}")
 
-        importances = get_feature_importances(_model_exp, _feat_cols_exp).head(10)
-        fig_imp = go.Figure(go.Bar(
-            x=importances.values[::-1],
-            y=importances.index[::-1],
-            orientation="h",
-            marker_color="#1f77b4",
-        ))
-        fig_imp.update_layout(
-            height=320,
-            template="plotly_white",
-            title="Top 10 feature importances",
-            xaxis_title="Importance",
-            margin=dict(t=40, l=160),
-        )
-        st.plotly_chart(fig_imp, use_container_width=True)
+            importances = get_feature_importances(_model_exp, _feat_cols_exp).head(10)
+            fig_imp = go.Figure(go.Bar(
+                x=importances.values[::-1],
+                y=importances.index[::-1],
+                orientation="h",
+                marker_color="#1f77b4",
+            ))
+            fig_imp.update_layout(
+                height=320,
+                template="plotly_white",
+                title="Top 10 feature importances",
+                xaxis_title="Importance",
+                margin=dict(t=40, l=160),
+            )
+            st.plotly_chart(fig_imp, use_container_width=True)
+
+    else:
+        st.info("Enable 'Include imbalance arbitrage' to see the strategy comparison.")
+
+# ---------------------------------------------------------------------------
+# Tab: Sensitivity
+# ---------------------------------------------------------------------------
+
+with tab_sensitivity:
+    st.subheader("Sensitivity: Revenue by Battery Size")
+    st.caption("Other parameters held constant at sidebar values.")
+
+    sens_df = sensitivity_table(
+        auctions,
+        mi_input,
+        battery,
+        power_range=[5, 10, 25, 50, 100, 200],
+        start_date=start_date,
+        end_date=end_date,
+        fr_fraction=fr_mw / power_mw if power_mw > 0 else 1.0,
+    )
+
+    st.dataframe(
+        sens_df.style.format({
+            "Energy (MWh)":             "{:.0f}",
+            "Total Net Revenue (£k)":   "{:,.1f}",
+            "Ann. Net Revenue (£k/yr)": "{:,.1f}",
+            "Revenue / MW (£k/MW/yr)":  "{:,.1f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )

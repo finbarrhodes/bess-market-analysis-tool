@@ -112,44 +112,8 @@ else:
     selected_services = []
 
 # Header
-st.title("GB BESS Market Dashboard")
+st.title("Market Overview")
 st.markdown("Data from the **Elexon Insights Solution API** and **NESO Data Portal**.")
-
-# Context expander
-with st.expander("About this dashboard — BESS revenue routes & market context"):
-    st.markdown(
-        """
-        Battery Energy Storage Systems (BESS) do not rely on a single revenue source — they
-        **stack** income from multiple markets, often simultaneously:
-
-        | Revenue route | How it works |
-        |---|---|
-        | **Frequency response** (Dynamic Services) | Paid a £/MW/h availability fee to hold discharge or charge headroom; activated automatically when grid frequency deviates from 50 Hz |
-        | **Wholesale arbitrage** | Charge during low-price periods (high wind, low demand); discharge during high-price periods |
-        | **Balancing Mechanism (BM)** | Dispatched by NESO in real time as a BM unit to correct short-term supply/demand imbalance |
-        | **Capacity Market** | Annual availability payment for committing to generate during periods of system stress |
-
-        **Why this dashboard focuses on Dynamic Services and wholesale prices:**
-        Dynamic services (DC, DM, DR) dominated the GB BESS revenue stack from roughly 2021 through
-        early 2023 — at times accounting for over 70% of total asset revenue, with some assets
-        earning ~£156k/MW/year at the 2022 peak
-        ([Modo Energy](https://modoenergy.com/research/future-of-battery-energy-storage-buildout-in-great-britain);
-        [Timera Energy](https://timera-energy.com/blog/battery-investors-confront-revenue-shift-in-2023/)).
-        From late 2022, a rapid influx of new BESS capacity saturated the frequency response
-        markets and revenues compressed sharply — a trend visible in the clearing price charts below.
-        Dynamic services remain a core stack component, but arbitrage and Capacity Market income
-        have grown in relative importance since.
-
-        **BESS is not the only participant in these markets.** Pumped-storage hydro (e.g. Dinorwig,
-        Cruachan) has provided fast frequency response for decades. Demand-side response and some
-        gas peakers also qualify, particularly for the slower DR service. However, BESS's
-        sub-second response capability has made it the dominant and marginal price-setting
-        technology in DC and DM auctions.
-
-        The **Revenue Backtester** page models the combined arbitrage + frequency response revenue
-        stack for a configurable asset.
-        """
-    )
 
 # Top-level metrics
 col1, col2, col3, col4 = st.columns(4)
@@ -158,15 +122,21 @@ col2.metric("System Price Records", f"{len(sys_prices):,}")
 col3.metric("Market Index Records", f"{len(mkt_index):,}")
 col4.metric("Generation Records", f"{len(gen_fuel):,}")
 
-# Tab layout
-tab_auction, tab_spread, tab_system, tab_gen, tab_cross = st.tabs(
-    ["Dynamic Services", "H vs L Spread", "System Prices", "Generation Mix", "System Price vs DC High"]
-)
+# ---------------------------------------------------------------------------
+# Outer tab layout
+# ---------------------------------------------------------------------------
+outer_fr, outer_grid = st.tabs(["Frequency Response Markets", "Grid & Settlement Prices"])
 
 # ---------------------------------------------------------------------------
-# Tab 1: Auctions
+# Outer Tab 1: Frequency Response Markets → sub-tabs
 # ---------------------------------------------------------------------------
-with tab_auction:
+with outer_fr:
+    sub_auction, sub_spread = st.tabs(["Dynamic Services", "H vs L Spread"])
+
+# ---------------------------------------------------------------------------
+# Sub-tab 1a: Dynamic Services
+# ---------------------------------------------------------------------------
+with sub_auction:
     if auction_filtered.empty:
         st.warning("No auction data loaded. Run scripts/prepare_data.py first.")
     else:
@@ -286,9 +256,9 @@ with tab_auction:
 
 
 # ---------------------------------------------------------------------------
-# Tab 2: H vs L Spread
+# Sub-tab 1b: H vs L Spread
 # ---------------------------------------------------------------------------
-with tab_spread:
+with sub_spread:
     if auctions.empty:
         st.warning("No auction data loaded. Run scripts/prepare_data.py first.")
     else:
@@ -466,9 +436,17 @@ with tab_spread:
 
 
 # ---------------------------------------------------------------------------
-# Tab 3: System Prices
+# Outer Tab 2: Grid & Settlement Prices → sub-tabs
 # ---------------------------------------------------------------------------
-with tab_system:
+with outer_grid:
+    sub_system, sub_gen, sub_cross = st.tabs(
+        ["System Prices", "Generation Mix", "Price Correlation"]
+    )
+
+# ---------------------------------------------------------------------------
+# Sub-tab 2a: System Prices
+# ---------------------------------------------------------------------------
+with sub_system:
     if sys_prices.empty:
         st.warning("No system price data loaded.")
     else:
@@ -586,9 +564,9 @@ with tab_system:
 
 
 # ---------------------------------------------------------------------------
-# Tab 4: Generation Mix
+# Sub-tab 2b: Generation Mix
 # ---------------------------------------------------------------------------
-with tab_gen:
+with sub_gen:
     if gen_fuel.empty:
         st.warning("No generation data loaded.")
     else:
@@ -646,9 +624,9 @@ with tab_gen:
 
 
 # ---------------------------------------------------------------------------
-# Tab 5: System Price vs DC High
+# Sub-tab 2c: Price Correlation
 # ---------------------------------------------------------------------------
-with tab_cross:
+with sub_cross:
     if sys_prices.empty or auctions.empty:
         st.warning("Need both system price and auction data for cross-source analysis.")
     else:
