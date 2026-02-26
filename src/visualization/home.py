@@ -24,11 +24,22 @@ except st.errors.StreamlitAPIException:
 # Header
 # ---------------------------------------------------------------------------
 
-st.title("UK BESS Market Analysis Tool")
+st.title("BESS Analytics Tools")
 st.markdown(
-    "An interactive analysis platform for GB Battery Energy Storage System (BESS) "
-    "market revenue, built on data from the **Elexon Insights Solution API** and "
-    "**NESO Data Portal**."
+
+    "Hello - my name is Finbar Rhodes and I have a passion for the energy transition and am particularly " \
+    "interested in flexibility and grid-scale energy storage. This role, particularly in the UK, has" \
+    "increasingly been filled by battery energy storage systems (BESS). The combination of improving battery" \
+    "technology, cheaper components, and the growing need for flexiblity assets in a grid increasingly " \
+    "reliant on renewable energy sources leaves BESS with a bright future in the energy transition. \n\n " \
+    "This is a personal coding project I have undertaken to dive into the clean tech and grid-scale" \
+    "battery landscape in the UK in hopes to not just learn through doing but to result in some useful " \
+    "insights. I have tried to focus on how BESS sites make their mark in the changing energy grid: " \
+    "availablity for frequency response services and arbitrage activity. I have a *Market Overview* "
+    "capacity section that shows how different market conditions have evolved over time as well as a "
+    "*Revenue Backtesting* tool to explore a BESS sites performance (revenue generation, cycling) "
+    "using naive, perfect foresight, and machine learning-based dispatch strategies. The data powering "
+    "this tool is sourced from the **Elexon Insights Solution API** and **NESO Data Portal**."\
 )
 
 st.divider()
