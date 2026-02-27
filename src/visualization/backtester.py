@@ -120,6 +120,20 @@ availability_pct = st.sidebar.slider(
     ),
 )
 
+initial_soc_pct = st.sidebar.slider(
+    "Initial SoC (%)",
+    min_value=10,
+    max_value=90,
+    value=50,
+    step=5,
+    help=(
+        "Battery state-of-charge at the start of the backtest period. "
+        "SoC is tracked continuously across EFA blocks and days thereafter. "
+        "The battery must remain within 10–90% to maintain headroom for "
+        "simultaneous DC High (discharge) and DC Low (charge) delivery."
+    ),
+)
+
 st.sidebar.divider()
 st.sidebar.subheader("Services to Include")
 
@@ -214,6 +228,7 @@ if auctions.empty:
 if dispatch_strategy == "Perfect Foresight":
     result = run_backtest(
         auctions, mi_input, battery, selected_services, start_date, end_date,
+        initial_soc_frac=initial_soc_pct / 100,
     )
     # Add total_mwh_cycled to summary for the comparison chart
     if result["monthly"] is not None and not result["monthly"].empty:
@@ -228,6 +243,7 @@ elif dispatch_strategy == "Naive (D-1 prices)":
     if not include_imbalance:
         result = run_backtest(
             auctions, pd.DataFrame(), battery, selected_services, start_date, end_date,
+            initial_soc_frac=initial_soc_pct / 100,
         )
         result["summary"]["total_mwh_cycled"] = 0.0
     else:
@@ -239,12 +255,14 @@ elif dispatch_strategy == "Naive (D-1 prices)":
             services=selected_services,
             start_date=start_date,
             end_date=end_date,
+            initial_soc_frac=initial_soc_pct / 100,
         )
 
 else:  # ML Model
     if not include_imbalance:
         result = run_backtest(
             auctions, pd.DataFrame(), battery, selected_services, start_date, end_date,
+            initial_soc_frac=initial_soc_pct / 100,
         )
         result["summary"]["total_mwh_cycled"] = 0.0
     else:
@@ -261,6 +279,7 @@ else:  # ML Model
             model=_model,
             feature_df=_feature_df,
             feature_cols=_feature_cols,
+            initial_soc_frac=initial_soc_pct / 100,
         )
 
 monthly = result["monthly"]
@@ -423,6 +442,7 @@ with tab_strategy:
             # --- Perfect Foresight ---
             pf_result = run_backtest(
                 auctions, mi_input, battery, selected_services, start_date, end_date,
+                initial_soc_frac=initial_soc_pct / 100,
             )
             pf_summary = pf_result["summary"]
             pf_mwh = 0.0
@@ -441,6 +461,7 @@ with tab_strategy:
                 services=selected_services,
                 start_date=start_date,
                 end_date=end_date,
+                initial_soc_frac=initial_soc_pct / 100,
             )
 
             # --- ML ---
@@ -459,6 +480,7 @@ with tab_strategy:
                 model=_cmp_model,
                 feature_df=_cmp_feat_df,
                 feature_cols=_cmp_feat_cols,
+                initial_soc_frac=initial_soc_pct / 100,
             )
 
         pf_net    = pf_summary.get("total_net", 0) / 1_000

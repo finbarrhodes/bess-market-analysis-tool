@@ -34,6 +34,54 @@ import numpy as np
 # Each EFA block is 4 hours in GB
 EFA_HOURS = 4
 
+# Accurate GB EFA block → settlement period mapping.
+# EFA 1 spans two calendar dates: periods 47–48 of D-1 plus periods 1–6 of D.
+# EFA 2–6 fall entirely within calendar date D.
+# Settlement periods are 1–48 (half-hourly, 00:00–24:00).
+# Note: DST changeover days may have 50 periods; callers should clip to ≤ 48 first.
+EFA_PERIODS = {
+    1: {"prev": [47, 48], "curr": [1, 2, 3, 4, 5, 6]},   # 23:00–03:00
+    2: {"prev": [],       "curr": list(range(7,  15))},    # 03:00–07:00
+    3: {"prev": [],       "curr": list(range(15, 23))},    # 07:00–11:00
+    4: {"prev": [],       "curr": list(range(23, 31))},    # 11:00–15:00
+    5: {"prev": [],       "curr": list(range(31, 39))},    # 15:00–19:00
+    6: {"prev": [],       "curr": list(range(39, 47))},    # 19:00–23:00
+}
+
+# FR SoC band: battery must stay within [lower, upper] × energy_mwh
+# to maintain headroom for both DC High (discharge) and DC Low (charge) delivery.
+FR_SOC_LOWER = 0.10
+FR_SOC_UPPER = 0.90
+
+
+def _efa_prices(apx_by_date: dict, date: pd.Timestamp, efa: int) -> pd.Series:
+    """
+    Return APXMIDP prices for the given EFA block, spanning D-1/D where needed.
+
+    Parameters
+    ----------
+    apx_by_date : dict
+        {pd.Timestamp (normalised): pd.Series(index=settlementPeriod, values=price)}
+        Built from the full (unfiltered) market_index so D-1 lookups succeed on the
+        first day of the backtest period.
+    date : pd.Timestamp
+        Calendar date D (normalised to midnight) for which the EFA block is required.
+    efa : int
+        EFA block number 1–6.
+
+    Returns
+    -------
+    pd.Series indexed by settlement period (values from the correct calendar date(s)).
+    For EFA 1: D-1 periods 47–48 followed by D periods 1–6 (up to 8 values).
+    For EFA 2–6: 8 values from D only.
+    """
+    curr = apx_by_date.get(date, pd.Series(dtype=float))
+    slices = [curr.reindex(EFA_PERIODS[efa]["curr"]).dropna()]
+    if EFA_PERIODS[efa]["prev"]:
+        prev = apx_by_date.get(date - pd.Timedelta(days=1), pd.Series(dtype=float))
+        slices.insert(0, prev.reindex(EFA_PERIODS[efa]["prev"]).dropna())
+    return pd.concat(slices)
+
 SERVICE_LABELS = {
     "DCH": "DC High",
     "DCL": "DC Low",
@@ -134,12 +182,27 @@ def calc_ancillary_revenue(
     df = df.copy()
 
     if fr_schedule is not None:
-        sched_map = {pd.Timestamp(k).normalize(): float(v) for k, v in fr_schedule.items()}
-        df["fr_mw_d"] = (
-            df["EFA Date"].dt.normalize()
-            .map(sched_map)
-            .fillna(battery.power_mw)
-        )
+        if isinstance(fr_schedule.index, pd.MultiIndex):
+            # Per-(date, EFA block) schedule — join on both keys
+            sched_map = {
+                (pd.Timestamp(d).normalize(), int(e)): float(v)
+                for (d, e), v in fr_schedule.items()
+            }
+            df["fr_mw_d"] = df.apply(
+                lambda r: sched_map.get(
+                    (pd.Timestamp(r["EFA Date"]).normalize(), int(r["EFA"])),
+                    battery.power_mw,
+                ),
+                axis=1,
+            )
+        else:
+            # Legacy daily schedule (date-only index)
+            sched_map = {pd.Timestamp(k).normalize(): float(v) for k, v in fr_schedule.items()}
+            df["fr_mw_d"] = (
+                df["EFA Date"].dt.normalize()
+                .map(sched_map)
+                .fillna(battery.power_mw)
+            )
         df["revenue_gbp"] = df["Clearing Price"] * df["fr_mw_d"] * EFA_HOURS
     else:
         if fr_mw is None:
@@ -170,22 +233,25 @@ def calc_imbalance_revenue(
     arb_mw: float = None,
     arb_energy_mwh: float = None,
     arb_schedule: "pd.Series | None" = None,
+    initial_soc_frac: float = 0.5,
 ) -> pd.DataFrame:
     """
-    Monthly wholesale energy arbitrage revenue using a daily intrinsic model.
+    Monthly wholesale energy arbitrage revenue using an EFA-block dispatch model.
 
-    Price reference: APXMIDP (APX Power UK Market Index) — the GB spot market
-    settlement reference price. Filtered from the market_index DataFrame which
-    may contain multiple data providers. N2EXMIDP is excluded as it carries
-    near-zero prices across most periods and is not a reliable price signal.
+    Price reference: APXMIDP — the GB spot market settlement reference.
+    N2EXMIDP is excluded (near-zero prices, unreliable signal).
 
-    For each settlement day:
-      - Identify the N cheapest half-hour periods (N = duration_h × 2) → charge here
-      - Identify the N most expensive half-hour periods → discharge here
-      - Gross profit = avg_discharge_price × energy_out
-                     − avg_charge_price × energy_in   (energy_in = energy_mwh / efficiency)
+    Each day is divided into 6 EFA blocks (4h each, 8 settlement periods each).
+    For each block independently:
+      - Identify the N cheapest periods → charge here
+      - Identify the N most expensive periods → discharge here
+      - Gross profit = avg_discharge × energy_out − avg_charge × energy_in
       - Deduct cycling wear cost = cycling_cost_per_mwh × energy_out
-      - Only execute the cycle if gross profit > cycling wear cost
+      - Only execute if gross profit > cycling wear cost AND SoC headroom allows
+
+    SoC is tracked across all 6 blocks within a day and carried into the next day.
+    The battery must stay within [FR_SOC_LOWER, FR_SOC_UPPER] × energy_mwh to
+    maintain headroom for simultaneous DC High and DC Low delivery.
 
     Parameters
     ----------
@@ -195,14 +261,16 @@ def calc_imbalance_revenue(
     arb_energy_mwh : float, optional
         Fixed usable energy (MWh). Ignored when arb_schedule is provided.
     arb_schedule : pd.Series, optional
-        Per-day arb MW (index = date, values = arb_mw). When provided,
-        energy capacity is computed per day as arb_mw_d × duration_h.
+        Per-(date, efa) arb MW as a MultiIndex Series, or per-date Series (legacy).
+        When provided, energy capacity is computed per block as arb_mw_d × duration_h.
+    initial_soc_frac : float
+        Starting SoC as a fraction of energy_mwh (default 0.5 = 50%).
 
     Returns
     -------
     DataFrame with columns: [month (Period), imbalance_revenue_gbp (float), cycling_cost_gbp (float)]
-    Where imbalance_revenue_gbp is the GROSS arbitrage profit (before deducting cycling wear),
-    so that the wear cost can be shown as a separate bar in the stacked chart.
+    imbalance_revenue_gbp is GROSS profit (before deducting cycling wear) so that
+    wear cost can be shown as a separate bar in the stacked chart.
     """
     if arb_schedule is None:
         if arb_mw is None:
@@ -215,45 +283,91 @@ def calc_imbalance_revenue(
     if market_index.empty:
         return pd.DataFrame(columns=["month", "imbalance_revenue_gbp", "cycling_cost_gbp"])
 
-    # Filter to APXMIDP only — the reliable GB spot price reference
-    df = market_index[market_index["dataProvider"] == "APXMIDP"].copy()
-    df = _filter_dates(df, "settlementDate", start_date, end_date)
+    # Build a full apx_by_date lookup from the entire market_index (no date filter)
+    # so that EFA 1's cross-day D-1 lookup succeeds on the first day of the period.
+    apx_full = (
+        market_index[market_index["dataProvider"] == "APXMIDP"]
+        .copy()
+        .assign(settlementDate=lambda d: pd.to_datetime(d["settlementDate"]).dt.normalize())
+    )
+    apx_full = apx_full[apx_full["settlementPeriod"] <= 48]  # drop DST extra periods
+    apx_by_date = {
+        date: grp.set_index("settlementPeriod")["price"]
+        for date, grp in apx_full.groupby("settlementDate")
+    }
 
-    if df.empty:
+    # Determine the sorted set of dates to iterate over (user-selected range only)
+    apx_filt = _filter_dates(apx_full.copy(), "settlementDate", start_date, end_date)
+    if apx_filt.empty:
         return pd.DataFrame(columns=["month", "imbalance_revenue_gbp", "cycling_cost_gbp"])
+    sorted_dates = sorted(apx_filt["settlementDate"].unique())
 
     n_periods = max(1, int(battery.duration_h * 2))
 
+    # Build arb schedule map: {(date, efa): arb_mw} or {date: arb_mw} (legacy)
+    use_efa_sched = False
     if arb_schedule is not None:
-        arb_sched_map = {pd.Timestamp(k).normalize(): float(v) for k, v in arb_schedule.items()}
-
-    rows = []
-    for date, day_df in df.groupby("settlementDate"):
-        if len(day_df) < n_periods * 2:
-            continue
-
-        if arb_schedule is not None:
-            arb_mw_d = arb_sched_map.get(pd.Timestamp(date).normalize(), 0.0)
-            if arb_mw_d <= 0:
-                continue
-            energy_out = arb_mw_d * battery.duration_h
-            energy_in  = energy_out / battery.efficiency_rt
+        if isinstance(arb_schedule.index, pd.MultiIndex):
+            # New EFA-block MultiIndex schedule
+            arb_sched_map = {
+                (pd.Timestamp(d).normalize(), int(e)): float(v)
+                for (d, e), v in arb_schedule.items()
+            }
+            use_efa_sched = True
         else:
-            energy_out = arb_energy_mwh
-            energy_in  = arb_energy_mwh / battery.efficiency_rt
+            # Legacy date-indexed schedule — same arb_mw applied to all blocks on a day
+            arb_sched_map = {
+                pd.Timestamp(k).normalize(): float(v)
+                for k, v in arb_schedule.items()
+            }
 
-        avg_charge    = day_df.nsmallest(n_periods, "price")["price"].mean()
-        avg_discharge = day_df.nlargest(n_periods, "price")["price"].mean()
+    soc     = initial_soc_frac * battery.energy_mwh
+    soc_min = FR_SOC_LOWER * battery.energy_mwh
+    soc_max = FR_SOC_UPPER * battery.energy_mwh
+    rows    = []
 
-        gross_profit = avg_discharge * energy_out - avg_charge * energy_in
-        cycling_wear = battery.cycling_cost_per_mwh * energy_out
+    for date in sorted_dates:
+        for efa in range(1, 7):
+            efa_prices = _efa_prices(apx_by_date, date, efa)
+            if len(efa_prices) < n_periods * 2:
+                continue
 
-        if gross_profit > cycling_wear:
-            rows.append({
-                "date": date,
-                "imbalance_revenue_gbp": gross_profit,
-                "cycling_cost_gbp":      cycling_wear,
-            })
+            # Resolve arb MW for this block
+            if arb_schedule is not None:
+                if use_efa_sched:
+                    arb_mw_d = arb_sched_map.get((date, efa), 0.0)
+                else:
+                    arb_mw_d = arb_sched_map.get(date, 0.0)
+                if arb_mw_d <= 0:
+                    continue
+                nominal_energy_out = arb_mw_d * battery.duration_h
+            else:
+                nominal_energy_out = arb_energy_mwh
+
+            # SoC-constrained energy bounds
+            energy_out = min(nominal_energy_out, max(0.0, soc - soc_min))
+            energy_in  = min(
+                energy_out / battery.efficiency_rt,
+                max(0.0, soc_max - soc),
+            )
+            if energy_out <= 0 or energy_in <= 0:
+                continue
+
+            avg_charge    = efa_prices.nsmallest(n_periods).mean()
+            avg_discharge = efa_prices.nlargest(n_periods).mean()
+            gross_profit  = avg_discharge * energy_out - avg_charge * energy_in
+            cycling_wear  = battery.cycling_cost_per_mwh * energy_out
+
+            if gross_profit > cycling_wear:
+                # Execute: update SoC
+                soc = soc - energy_out + energy_in * battery.efficiency_rt
+                soc = float(np.clip(soc, 0, battery.energy_mwh))
+                rows.append({
+                    "date":                  date,
+                    "imbalance_revenue_gbp": gross_profit,
+                    "cycling_cost_gbp":      cycling_wear,
+                })
+            # Not profitable: no dispatch, SoC unchanged
 
     if not rows:
         return pd.DataFrame(columns=["month", "imbalance_revenue_gbp", "cycling_cost_gbp"])
@@ -283,6 +397,7 @@ def run_backtest(
     start_date=None,
     end_date=None,
     fr_mw: float = None,
+    initial_soc_frac: float = 0.5,
 ) -> dict:
     """
     Run the full revenue stack backtest.
@@ -299,9 +414,11 @@ def run_backtest(
     fr_mw         : float, optional
         MW committed to FR availability services for the entire period. When
         provided, a fixed split is applied — used internally by find_optimal_split.
-        When omitted (default), a day-ahead dynamic allocation is computed for each
-        day using the confirmed FR clearing price vs a perfect-foresight shadow arb
-        estimate. Falls back to full FR commitment if market_index is empty.
+        When omitted (default), a per-EFA-block dynamic allocation is computed using
+        the confirmed FR clearing price vs a perfect-foresight shadow arb estimate.
+        Falls back to full FR commitment if market_index is empty.
+    initial_soc_frac : float
+        Starting SoC as a fraction of battery.energy_mwh (default 0.5 = 50%).
 
     Returns
     -------
@@ -333,6 +450,7 @@ def run_backtest(
             fr_sch    = compute_daily_fr_schedule(
                 auctions, pf_prices, battery, services, start_date, end_date
             )
+            # arb_sch is the complement of fr_sch, same MultiIndex
             arb_sch   = (battery.power_mw - fr_sch).clip(lower=0)
             avg_fr_mw = float(fr_sch.mean()) if len(fr_sch) > 0 else battery.power_mw
         else:
@@ -359,14 +477,16 @@ def run_backtest(
     # --- Arbitrage ---
     if arb_sch is not None:
         imb = calc_imbalance_revenue(
-            market_index, battery, start_date, end_date, arb_schedule=arb_sch,
+            market_index, battery, start_date, end_date,
+            arb_schedule=arb_sch, initial_soc_frac=initial_soc_frac,
         )
     else:
-        arb_mw_fixed       = battery.power_mw - (fr_mw if fr_mw is not None else battery.power_mw)
+        arb_mw_fixed         = battery.power_mw - (fr_mw if fr_mw is not None else battery.power_mw)
         arb_energy_mwh_fixed = arb_mw_fixed * battery.duration_h
         imb = calc_imbalance_revenue(
             market_index, battery, start_date, end_date,
             arb_mw=arb_mw_fixed, arb_energy_mwh=arb_energy_mwh_fixed,
+            initial_soc_frac=initial_soc_frac,
         )
     if not imb.empty:
         imb_wide = imb.set_index("month")
@@ -540,27 +660,26 @@ def compute_daily_fr_schedule(
     end_date=None,
 ) -> pd.Series:
     """
-    Day-ahead FR/arbitrage capacity allocation optimiser.
+    Day-ahead FR/arbitrage capacity allocation optimiser — EFA block granularity.
 
-    For each day D with an entry in forecast_prices_by_date, compares:
+    For each day D and each EFA block (1–6) with confirmed auction data, compares:
 
-    FR value per MW (£/MW/day):
-        Sum of clearing prices × EFA_HOURS across all selected services for
-        that EFA date. EAC runs daily day-ahead auctions, so clearing prices
-        for day D are known by end of day D-1 — no look-ahead bias.
+    FR value per MW (£/MW/block):
+        Clearing price × EFA_HOURS for that specific EFA block and service set.
+        EAC auctions clear day-ahead, so the clearing price for day D is known
+        by end of D-1 — no look-ahead bias.
 
-    Shadow arb value per MW (£/MW/day):
-        Estimated net profit from one full arbitrage cycle using forecast prices:
+    Shadow arb value per MW (£/MW/block):
+        Estimated net profit from one arbitrage cycle within the block's
+        8 settlement periods using forecast prices:
         (avg_discharge − avg_charge / η − cycling_cost) × duration_h.
-        This is a per-unit (1 MW) estimate; since arbitrage revenue scales
-        linearly with MW, only the per-MW rate is needed for the comparison.
 
-    Allocation rule (proportional):
+    Allocation rule (proportional, per block):
         fr_fraction = fr_value / (fr_value + arb_value)
 
-    Capacity flows toward whichever stream looks more attractive on that day
-    without all-or-nothing switching. Days where arb is unprofitable
-    (arb_value = 0) receive full FR commitment.
+    Capacity flows toward the better-paying stream each block without
+    all-or-nothing switching. Blocks where arb is unprofitable receive
+    full FR commitment.
 
     Parameters
     ----------
@@ -575,51 +694,64 @@ def compute_daily_fr_schedule(
 
     Returns
     -------
-    pd.Series indexed by pd.Timestamp (normalised to midnight), values = fr_mw.
+    pd.Series with pd.MultiIndex of (date: pd.Timestamp, efa: int), values = fr_mw.
     """
     if services is None:
         services = ALL_SERVICES
 
-    # Daily FR value per MW from confirmed auction clearing prices.
-    # EAC clearing prices are for the service delivery date and are determined
-    # in the day-ahead auction — used directly with no lag.
+    # Per-EFA-block FR value per MW from confirmed auction clearing prices.
+    # EAC auctions clear day-ahead for each EFA block independently.
     df_a = _filter_dates(auctions.copy(), "EFA Date", start_date, end_date)
     df_a = df_a[df_a["Service"].isin(services)]
     df_a = df_a[df_a["Clearing Price"] >= 0.0]
 
+    # Sum clearing prices (×EFA_HOURS) across services for each (EFA Date, EFA block)
     if not df_a.empty:
-        daily_fr_value = (
-            df_a.groupby("EFA Date")["Clearing Price"]
+        df_a["EFA Date"] = pd.to_datetime(df_a["EFA Date"]).dt.normalize()
+        efa_fr_value = (
+            df_a.groupby(["EFA Date", "EFA"])["Clearing Price"]
             .apply(lambda x: (x * EFA_HOURS).sum())
-        )
-        daily_fr_value.index = pd.DatetimeIndex(daily_fr_value.index).normalize()
+        )  # MultiIndex (EFA Date, EFA) → £/MW/block
     else:
-        daily_fr_value = pd.Series(dtype=float)
+        efa_fr_value = pd.Series(dtype=float)
+
+    # Build a full apx_by_date dict from forecast_prices_by_date so _efa_prices
+    # can handle EFA 1's cross-day (D-1 periods 47–48) lookup.
+    apx_by_date = {
+        pd.Timestamp(d).normalize(): prices
+        for d, prices in forecast_prices_by_date.items()
+    }
 
     n_periods = max(1, int(battery.duration_h * 2))
     schedule  = {}
 
-    for date, forecast_prices in forecast_prices_by_date.items():
-        date_ts = pd.Timestamp(date).normalize()
+    all_dates = sorted({pd.Timestamp(d).normalize() for d in forecast_prices_by_date})
 
-        # FR value per MW: confirmed clearing price for this day
-        fr_value = float(daily_fr_value.get(date_ts, 0.0))
+    for date_ts in all_dates:
+        for efa in range(1, 7):
+            # FR value per MW: confirmed clearing price for this (date, block)
+            fr_value = float(efa_fr_value.get((date_ts, efa), 0.0))
 
-        # Shadow arb value per MW: estimated net profit from one cycle
-        if len(forecast_prices) >= n_periods * 2:
-            avg_discharge = forecast_prices.nlargest(n_periods).mean()
-            avg_charge    = forecast_prices.nsmallest(n_periods).mean()
-            net_per_mw = (
-                avg_discharge
-                - avg_charge / battery.efficiency_rt
-                - battery.cycling_cost_per_mwh
-            ) * battery.duration_h
-            arb_value = max(0.0, net_per_mw)
-        else:
-            arb_value = 0.0
+            # Shadow arb value per MW: estimated from the block's forecast prices
+            fp_block = _efa_prices(apx_by_date, date_ts, efa)
+            if len(fp_block) >= n_periods * 2:
+                avg_discharge = fp_block.nlargest(n_periods).mean()
+                avg_charge    = fp_block.nsmallest(n_periods).mean()
+                net_per_mw = (
+                    avg_discharge
+                    - avg_charge / battery.efficiency_rt
+                    - battery.cycling_cost_per_mwh
+                ) * battery.duration_h
+                arb_value = max(0.0, net_per_mw)
+            else:
+                arb_value = 0.0
 
-        total       = fr_value + arb_value
-        fr_fraction = (fr_value / total) if total > 0 else 1.0
-        schedule[date_ts] = fr_fraction * battery.power_mw
+            total       = fr_value + arb_value
+            fr_fraction = (fr_value / total) if total > 0 else 1.0
+            schedule[(date_ts, efa)] = fr_fraction * battery.power_mw
 
-    return pd.Series(schedule, name="fr_mw")
+    if not schedule:
+        return pd.Series(dtype=float, name="fr_mw")
+
+    idx = pd.MultiIndex.from_tuples(list(schedule.keys()), names=["date", "efa"])
+    return pd.Series(list(schedule.values()), index=idx, name="fr_mw")

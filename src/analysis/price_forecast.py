@@ -386,30 +386,33 @@ def run_forecast_backtest(
     model=None,
     feature_df: pd.DataFrame = None,
     feature_cols: list = None,
+    initial_soc_frac: float = 0.5,
 ) -> dict:
     """
     Run a forecast-driven revenue backtest for either the 'naive' or 'ml' strategy.
 
     Uses a two-pass approach:
-      1. Collect forecast prices for all days in the period (first pass).
-      2. Run compute_daily_fr_schedule() to determine per-day FR/arb allocation:
-         for each day D, compare the confirmed FR clearing price (known from the
-         EAC day-ahead auction) against a shadow arb estimate from the forecast.
-      3. Dispatch within the allocated arb_mw for each day, realising revenue
-         against actual prices (second pass).
+      1. Collect forecast prices for all days in the period.
+      2. Run compute_daily_fr_schedule() to determine per-EFA-block FR/arb allocation:
+         for each block, compare the confirmed FR clearing price against a shadow arb
+         estimate from the forecast prices for that block's 8 settlement periods.
+      3. Dispatch within the allocated arb_mw for each EFA block, realising revenue
+         against actual prices. SoC is tracked across all 6 blocks per day and
+         carried into the next day.
 
     Parameters
     ----------
-    strategy     : "naive" or "ml"
-    market_index : DataFrame from load_market_index()
-    auctions     : DataFrame from load_auctions()
-    battery      : BatterySpec instance
-    services     : list of service codes to include
-    start_date   : inclusive backtest start
-    end_date     : inclusive backtest end
-    model        : fitted model object (required for strategy="ml")
-    feature_df   : feature matrix from build_feature_matrix() (required for strategy="ml")
-    feature_cols : feature column list from train_forecast_model() (required for strategy="ml")
+    strategy         : "naive" or "ml"
+    market_index     : DataFrame from load_market_index()
+    auctions         : DataFrame from load_auctions()
+    battery          : BatterySpec instance
+    services         : list of service codes to include
+    start_date       : inclusive backtest start
+    end_date         : inclusive backtest end
+    model            : fitted model object (required for strategy="ml")
+    feature_df       : feature matrix from build_feature_matrix() (required for strategy="ml")
+    feature_cols     : feature column list from train_forecast_model() (required for strategy="ml")
+    initial_soc_frac : float — starting SoC as fraction of energy_mwh (default 0.5)
 
     Returns
     -------
@@ -420,6 +423,10 @@ def run_forecast_backtest(
     from src.analysis.revenue_stack import (
         calc_ancillary_revenue,
         compute_daily_fr_schedule,
+        EFA_PERIODS,
+        FR_SOC_LOWER,
+        FR_SOC_UPPER,
+        _efa_prices,
         ALL_SERVICES,
     )
     import numpy as np
@@ -427,19 +434,26 @@ def run_forecast_backtest(
     if services is None:
         services = ALL_SERVICES
 
-    # --- Filter APX spot prices ---
-    apx_full = market_index[market_index["dataProvider"] == "APXMIDP"].copy()
-    apx_full["settlementDate"] = pd.to_datetime(apx_full["settlementDate"]).dt.normalize()
+    # Build full apx_by_date lookup (unfiltered) so EFA 1 D-1 lookups work on first day
+    apx_all = market_index[market_index["dataProvider"] == "APXMIDP"].copy()
+    apx_all["settlementDate"] = pd.to_datetime(apx_all["settlementDate"]).dt.normalize()
+    apx_all = apx_all[apx_all["settlementPeriod"] <= 48]
+    apx_by_date = {
+        date: grp.set_index("settlementPeriod")["price"]
+        for date, grp in apx_all.groupby("settlementDate")
+    }
 
-    sd = pd.Timestamp(start_date) if start_date else apx_full["settlementDate"].min()
-    ed = pd.Timestamp(end_date)   if end_date   else apx_full["settlementDate"].max()
-    apx_period = apx_full[(apx_full["settlementDate"] >= sd) & (apx_full["settlementDate"] <= ed)]
+    sd = pd.Timestamp(start_date) if start_date else apx_all["settlementDate"].min()
+    ed = pd.Timestamp(end_date)   if end_date   else apx_all["settlementDate"].max()
+    sorted_dates = sorted(
+        d for d in apx_by_date if sd <= d <= ed
+    )
 
-    # --- First pass: collect forecast prices for all days ---
-    forecast_prices_by_date = {}
-    for date, day_actual in apx_period.groupby("settlementDate"):
+    # --- First pass: collect forecast prices for all days in range ---
+    forecast_prices_by_date: dict = {}
+    for date in sorted_dates:
         if strategy == "naive":
-            fp = naive_day_prices(apx_full, date)
+            fp = naive_day_prices(market_index, date)
         elif strategy == "ml":
             fp = predict_day_prices(model, feature_cols, feature_df, date)
         else:
@@ -447,19 +461,20 @@ def run_forecast_backtest(
         if not fp.empty:
             forecast_prices_by_date[date] = fp
 
-    # --- Dynamic day-ahead capacity allocation ---
-    # For each day D: confirmed FR clearing price vs shadow arb estimate from forecast.
+    # --- Per-EFA-block capacity allocation ---
+    # For each block: confirmed FR clearing price vs forecast-based shadow arb estimate.
     fr_schedule = compute_daily_fr_schedule(
         auctions, forecast_prices_by_date, battery, services, start_date, end_date
     )
+    # arb_sched_map: {(date, efa): arb_mw}
     arb_sched_map = {
-        pd.Timestamp(k).normalize(): battery.power_mw - float(v)
-        for k, v in fr_schedule.items()
+        (pd.Timestamp(d).normalize(), int(e)): battery.power_mw - float(v)
+        for (d, e), v in fr_schedule.items()
     }
     avg_fr_mw  = float(fr_schedule.mean()) if len(fr_schedule) > 0 else battery.power_mw
     avg_arb_mw = battery.power_mw - avg_fr_mw
 
-    # --- Ancillary revenue (scaled by per-day fr_mw from allocation) ---
+    # --- Ancillary revenue (scaled by per-EFA-block fr_mw) ---
     anc = calc_ancillary_revenue(
         auctions, battery, services, start_date, end_date, fr_schedule=fr_schedule,
     )
@@ -471,31 +486,48 @@ def run_forecast_backtest(
     else:
         anc_wide = pd.DataFrame()
 
-    # --- Second pass: forecast-driven dispatch within allocated arb_mw ---
+    # --- Second pass: EFA-block dispatch with SoC tracking ---
     n_periods = max(1, int(battery.duration_h * 2))
+    soc       = initial_soc_frac * battery.energy_mwh
+    soc_min   = FR_SOC_LOWER * battery.energy_mwh
+    soc_max   = FR_SOC_UPPER * battery.energy_mwh
     arb_rows  = []
 
-    for date, day_actual in apx_period.groupby("settlementDate"):
-        actual_prices   = day_actual.set_index("settlementPeriod")["price"]
-        forecast_prices = forecast_prices_by_date.get(date)
-        if forecast_prices is None:
+    for date in sorted_dates:
+        fp_day = forecast_prices_by_date.get(date)
+        if fp_day is None:
             continue
+        # Build a forecast lookup dict with just this day (for _efa_prices)
+        # Forecast EFA 1 D-1 periods are absent — _efa_prices returns only available data
+        fp_by_date = {date: fp_day}
 
-        arb_mw_d = arb_sched_map.get(pd.Timestamp(date).normalize(), 0.0)
-        if arb_mw_d <= 0:
-            continue
+        for efa in range(1, 7):
+            actual_efa   = _efa_prices(apx_by_date, date, efa)
+            forecast_efa = _efa_prices(fp_by_date, date, efa)
 
-        energy_out_d = arb_mw_d * battery.duration_h
-        energy_in_d  = energy_out_d / battery.efficiency_rt
+            arb_mw_d = arb_sched_map.get((date, efa), 0.0)
+            if arb_mw_d <= 0:
+                continue
 
-        result_d = _dispatch_day(
-            forecast_prices, actual_prices,
-            n_periods, energy_out_d, energy_in_d,
-            battery.cycling_cost_per_mwh,
-        )
-        if result_d:
-            result_d["date"] = date
-            arb_rows.append(result_d)
+            nominal_energy_out = arb_mw_d * battery.duration_h
+            energy_out = min(nominal_energy_out, max(0.0, soc - soc_min))
+            energy_in  = min(
+                energy_out / battery.efficiency_rt,
+                max(0.0, soc_max - soc),
+            )
+            if energy_out <= 0 or energy_in <= 0:
+                continue
+
+            result_d = _dispatch_day(
+                forecast_efa, actual_efa,
+                n_periods, energy_out, energy_in,
+                battery.cycling_cost_per_mwh,
+            )
+            if result_d:
+                soc = soc - result_d["mwh_cycled"] + result_d["mwh_cycled"] / battery.efficiency_rt
+                soc = float(np.clip(soc, 0, battery.energy_mwh))
+                result_d["date"] = date
+                arb_rows.append(result_d)
 
     if arb_rows:
         daily_arb = pd.DataFrame(arb_rows)
