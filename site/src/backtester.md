@@ -46,9 +46,9 @@ const sampleDay = (await FileAttachment("data/sample-day.parquet").parquet()).to
 
 ### A day of wholesale prices
 
-Half-hourly APXMIDP prices for **8 January 2026**, a representative GB winter day. Prices
-run from £73 to £291/MWh — an overnight trough, a morning rise, and the evening peak when
-demand is highest and wind typically eases.
+To the right are half-hourly APXMIDP prices for a random GB winter day (January 8th 2026 here). Prices
+run from £73 to £291/MWh, defined by an overnight trough, a morning rise, and the evening peak when
+demand is highest, wind may ease, and there is no solar generation.
 
 That spread is the raw arbitrage opportunity: buy low, sell high.
 </div></div>
@@ -56,9 +56,9 @@ That spread is the raw arbitrage opportunity: buy low, sell high.
 <div class="step"><div class="step-inner">
 <span class="step-num">Step 2</span>
 
-### Charge cheap, discharge dear
+### Charge cheap, discharge at the peak
 
-The obvious play. Charge through the overnight trough, discharge into the evening peak.
+The obvious arbitrage value for battery sites: Charge through the overnight trough, discharge into the evening peak.
 
 The catch is that a 2-hour battery can only shift so much energy, and every cycle costs
 something in degradation — so the model has to pick *which* periods are worth trading, not
