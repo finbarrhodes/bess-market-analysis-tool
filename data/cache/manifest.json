@@ -1,13 +1,13 @@
 {
   "pf_mpc": {
-    "computed_at": "2026-08-18T15:12:50.098152+00:00",
-    "git_sha": "f5325e53415a016038458b3f37d861ff3733ce6d",
+    "computed_at": "2026-09-08T12:14:27.734868+00:00",
+    "git_sha": "1408e21421f1af0ad31c5c52a28e16f6a692da5a",
     "data_mtimes": {
-      "auctions.parquet": 1787051911.7881904,
-      "bess_fleet_capacity.parquet": 1787051916.1542282,
-      "generation_daily.parquet": 1787051916.0978034,
-      "market_index.parquet": 1787051913.0704134,
-      "system_prices.parquet": 1787051913.2642205
+      "auctions.parquet": 1788868231.5648346,
+      "bess_fleet_capacity.parquet": 1788868243.1590447,
+      "generation_daily.parquet": 1788868243.155298,
+      "market_index.parquet": 1788868232.7657495,
+      "system_prices.parquet": 1788868232.9180892
     },
     "params": {
       "power_mw": 50.0,
@@ -43,14 +43,14 @@
     }
   },
   "naive_mpc": {
-    "computed_at": "2026-08-18T15:21:34.944596+00:00",
-    "git_sha": "f5325e53415a016038458b3f37d861ff3733ce6d",
+    "computed_at": "2026-09-08T12:23:39.017779+00:00",
+    "git_sha": "1408e21421f1af0ad31c5c52a28e16f6a692da5a",
     "data_mtimes": {
-      "auctions.parquet": 1787051911.7881904,
-      "bess_fleet_capacity.parquet": 1787051916.1542282,
-      "generation_daily.parquet": 1787051916.0978034,
-      "market_index.parquet": 1787051913.0704134,
-      "system_prices.parquet": 1787051913.2642205
+      "auctions.parquet": 1788868231.5648346,
+      "bess_fleet_capacity.parquet": 1788868243.1590447,
+      "generation_daily.parquet": 1788868243.155298,
+      "market_index.parquet": 1788868232.7657495,
+      "system_prices.parquet": 1788868232.9180892
     },
     "params": {
       "power_mw": 50.0,
@@ -87,14 +87,14 @@
     }
   },
   "ml_mpc": {
-    "computed_at": "2026-08-18T15:30:59.110991+00:00",
-    "git_sha": "f5325e53415a016038458b3f37d861ff3733ce6d",
+    "computed_at": "2026-09-08T12:33:18.659181+00:00",
+    "git_sha": "1408e21421f1af0ad31c5c52a28e16f6a692da5a",
     "data_mtimes": {
-      "auctions.parquet": 1787051911.7881904,
-      "bess_fleet_capacity.parquet": 1787051916.1542282,
-      "generation_daily.parquet": 1787051916.0978034,
-      "market_index.parquet": 1787051913.0704134,
-      "system_prices.parquet": 1787051913.2642205
+      "auctions.parquet": 1788868231.5648346,
+      "bess_fleet_capacity.parquet": 1788868243.1590447,
+      "generation_daily.parquet": 1788868243.155298,
+      "market_index.parquet": 1788868232.7657495,
+      "system_prices.parquet": 1788868232.9180892
     },
     "params": {
       "power_mw": 50.0,
@@ -111,122 +111,122 @@
       "test_start": "2025-03-01"
     },
     "summary": {
-      "total_gross": 51009911.0,
-      "total_cycling_cost": 174517.0,
-      "total_net": 50835394.0,
+      "total_gross": 51085968.0,
+      "total_cycling_cost": 165209.0,
+      "total_net": 50920759.0,
       "years_covered": 5.0,
-      "annualised_net": 10167079.0,
-      "annualised_per_mw": 203342.0,
+      "annualised_net": 10184152.0,
+      "annualised_per_mw": 203683.0,
       "breakdown": {
-        "DCH": 5201418.0,
-        "DCL": 12369950.0,
-        "DMH": 3223035.0,
-        "DML": 7294928.0,
-        "DRH": -518631.0,
-        "DRL": 20127494.0,
-        "Arbitrage": 3311719.0
+        "DCH": 5211375.0,
+        "DCL": 12392383.0,
+        "DMH": 3211843.0,
+        "DML": 7352190.0,
+        "DRH": -612025.0,
+        "DRL": 20255923.0,
+        "Arbitrage": 3274278.0
       },
       "top_service": "DRL",
-      "fr_mw": 45.54958150502721,
-      "arb_mw": 4.450418494972787,
-      "total_mwh_cycled": 58172.4
+      "fr_mw": 45.73198623257516,
+      "arb_mw": 4.26801376742484,
+      "total_mwh_cycled": 55069.5
     },
     "model_metrics": {
       "train": {
-        "rmse": 18.54,
-        "mae": 7.29,
+        "rmse": 18.51,
+        "mae": 7.28,
         "spearman": 0.984,
         "n_samples": 104634,
-        "spike_rmse": 50.78
+        "spike_rmse": 50.72
       },
       "test": {
-        "rmse": 36.8,
-        "mae": 27.83,
-        "spearman": 0.542,
+        "rmse": 34.14,
+        "mae": 25.5,
+        "spearman": 0.607,
         "n_samples": 25678,
-        "spike_rmse": 56.96
+        "spike_rmse": 50.92
       }
     },
     "feature_importances": [
       {
         "feature": "apx_lag_1d",
-        "importance": 0.25200857610567207
+        "importance": 0.24794030248595553
       },
       {
         "feature": "prev_day_mean",
-        "importance": 0.145550490743703
+        "importance": 0.15007893756734506
       },
       {
         "feature": "prev_day_max",
-        "importance": 0.06189429817418696
+        "importance": 0.06278948860005201
       },
       {
         "feature": "apx_lag_2d",
-        "importance": 0.06128882588494459
+        "importance": 0.0597543788755706
       },
       {
         "feature": "apx_lag_7d",
-        "importance": 0.044709172743075815
+        "importance": 0.04561143532134415
       },
       {
         "feature": "sp_sin",
-        "importance": 0.040938054293013226
+        "importance": 0.040988066995520316
       },
       {
         "feature": "sp_cos",
-        "importance": 0.03590302296672028
-      },
-      {
-        "feature": "apx_lag_14d",
-        "importance": 0.03555045025441358
+        "importance": 0.036945404823692046
       },
       {
         "feature": "prev_day_min",
-        "importance": 0.03485978894832687
+        "importance": 0.0351911573841098
+      },
+      {
+        "feature": "apx_lag_14d",
+        "importance": 0.03478943857011718
       },
       {
         "feature": "rolling_7d_mean",
-        "importance": 0.02715133959878352
+        "importance": 0.02619835603581117
       },
       {
         "feature": "gen_fossil_frac",
-        "importance": 0.021036997603577523
+        "importance": 0.0199346324430051
       },
       {
         "feature": "doy_cos",
-        "importance": 0.01976871815373836
-      },
-      {
-        "feature": "gen_renewable_frac",
-        "importance": 0.019141547717561172
+        "importance": 0.01962722449628792
       },
       {
         "feature": "gen_gas",
-        "importance": 0.01871910523211014
+        "importance": 0.019164846431733683
       },
       {
         "feature": "gen_pumped_storage",
-        "importance": 0.018178592924148012
+        "importance": 0.01882352666668073
+      },
+      {
+        "feature": "gen_renewable_frac",
+        "importance": 0.018403794372548053
       },
       {
         "feature": "prev_day_std",
-        "importance": 0.0172916404105518
+        "importance": 0.017214053436216938
       },
       {
         "feature": "gen_nuclear",
-        "importance": 0.01622343817751162
-      },
-      {
-        "feature": "doy_sin",
-        "importance": 0.013182189059962077
+        "importance": 0.015093765261524276
       },
       {
         "feature": "gen_solar",
-        "importance": 0.012624289465464275
+        "importance": 0.013252582010283237
+      },
+      {
+        "feature": "doy_sin",
+        "importance": 0.012985711625583046
       },
       {
         "feature": "gen_other",
-        "importance": 0.012245066708295383
+        "importance": 0.012714213862320316
       }
     ]
   }

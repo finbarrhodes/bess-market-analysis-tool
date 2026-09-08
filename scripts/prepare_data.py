@@ -110,22 +110,45 @@ print(f"  {len(sp):,} rows  →  {_kb(out)} KB  ({out.name})")
 # granularity (69 MB CSV) can be collapsed to ~14 k rows here.
 # ---------------------------------------------------------------------------
 print("Processing generation (aggregating to daily by fuel group)...")
-frames = []
-for p in sorted(RAW.glob("generation_by_fuel_*.csv")):
-    frames.append(pd.read_csv(
-        p,
-        parse_dates=["settlementDate"],
-        usecols=["settlementDate", "fuelType", "generation"],
-    ))
 
-for p in sorted(RAW.glob("embedded_solar_wind_*.csv")):
-    frames.append(pd.read_csv(
-        p,
-        parse_dates=["settlementDate"],
-        usecols=["settlementDate", "fuelType", "generation"],
-    ))
+# The raw pulls overlap: generation_by_fuel_2019-01-01_2026-03-18.csv re-covers
+# almost everything the earlier files hold, so a plain concat counts most of
+# history twice (and Feb 2026 three times). Deduplicate per source before
+# summing, exactly as the auction and market-index sections above do.
+#
+# Keys differ by source because the columns do. FUELHH carries startTime, the
+# true UTC half-hour, which is unique per fuel and survives the BST/GMT clock
+# changes that make settlementPeriod ambiguous twice a year. The embedded
+# series has no startTime, so it falls back to the settlement key.
+gen_by_fuel = pd.concat(
+    [
+        pd.read_csv(
+            p,
+            parse_dates=["settlementDate", "startTime"],
+            usecols=["settlementDate", "startTime", "fuelType", "generation"],
+        )
+        for p in sorted(RAW.glob("generation_by_fuel_*.csv"))
+    ],
+    ignore_index=True,
+).drop_duplicates(subset=["startTime", "fuelType"])
 
-gen = pd.concat(frames, ignore_index=True)
+embedded = pd.concat(
+    [
+        pd.read_csv(
+            p,
+            parse_dates=["settlementDate"],
+            usecols=["settlementDate", "settlementPeriod", "fuelType", "generation"],
+        )
+        for p in sorted(RAW.glob("embedded_solar_wind_*.csv"))
+    ],
+    ignore_index=True,
+).drop_duplicates(subset=["settlementDate", "settlementPeriod", "fuelType"])
+
+gen = pd.concat(
+    [gen_by_fuel[["settlementDate", "fuelType", "generation"]],
+     embedded[["settlementDate", "fuelType", "generation"]]],
+    ignore_index=True,
+)
 gen["fuelGroup"] = gen["fuelType"].map(FUEL_GROUP_MAP).fillna("Other")
 
 gen_daily = (

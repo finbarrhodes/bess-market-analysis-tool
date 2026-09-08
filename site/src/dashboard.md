@@ -33,18 +33,25 @@ const generation = (await FileAttachment("data/generation-daily.parquet").parque
 The generation mix is the clearest way to see why these markets exist and why they have
 grown. Wind and solar rise; gas and coal fall; the system carries less and less inertia.
 
-GB generation by fuel group. The mix matters for BESS because it shapes the underlying risk
-of frequency deviation: high wind with low demand pushes frequency high, which the High-side
-services answer by charging, while low wind with high demand can cause dips, which the
+The relative mix matters because it shapes the underlying risk of frequency deviation and thus
+the opportunity for BESS sites to step in: high wind with low demand pushes frequency high, which the
+High-side services answer by charging, while low wind with high demand can cause dips, which the
 Low-side services answer by discharging. The High and Low in DCH, DCL and the rest name the
 frequency excursion being corrected, not the direction the battery moves power.
 
 ```js
+// `generation` is the daily sum of the half-hourly MW readings, so each reading
+// covers half an hour: multiplying by 0.5 h turns the sum into energy (MWh).
+// Dividing by the period count would give mean MW instead, but a daily total
+// reads more naturally as energy.
+const MWH_PER_MW_READING = 0.5;
+
 const genRolling = (() => {
   const out = [];
   for (const [fuel, rows] of d3.group(generation, (d) => d.fuel_group)) {
-    const sorted = d3.sort(rows, (d) => d.date).map((d) => ({date: d.date, value: d.generation}));
-    for (const r of rollingMean(sorted, 14)) out.push({...r, fuel});
+    const sorted = d3.sort(rows, (d) => d.date)
+      .map((d) => ({date: d.date, value: d.generation * MWH_PER_MW_READING}));
+    for (const r of rollingMean(sorted, 28)) out.push({...r, fuel});
   }
   return out;
 })();
@@ -56,7 +63,7 @@ const fuelOrder = Array.from(
 display(Plot.plot({
   height: 460, marginLeft: 60,
   x: {label: null},
-  y: {label: "Avg generation (MW)", grid: true},
+  y: {label: "Daily generation (MWh)", grid: true},
   color: {legend: true, domain: fuelOrder},
   marks: [
     Plot.ruleY([0], {strokeOpacity: 0.3}),
@@ -65,8 +72,7 @@ display(Plot.plot({
 }));
 ```
 
-14-day rolling mean, smoothing day-to-day noise while still resolving seasonal swings.
-Click legend entries to isolate a fuel group.
+This plot shows a 28-day rolling mean, smoothing day-to-day noise while still capturing seasonal swings.
 
 ### Average share by fuel group
 
@@ -92,12 +98,11 @@ display(Plot.plot({
 }));
 ```
 
-## How a battery earns from it
+## How batteries capitalise
 
-A grid-scale battery in GB has two main routes to revenue, and this page covers the market
-data behind both.
+A grid-scale battery in GB has three main routes to revenue: frequency response (ancillary services), wholsale arbitrage, and capacity markets. As capacity markets are longer-horizon auctions (one or four years out from delivery) with more site-specifc physical limitations, this page covers the market for both the shorter term markets: frequency response and wholesale arbitrage.
 
-**Frequency response — contracted availability.** NESO runs daily auctions for capacity
+**Frequency response: contracted availability.** NESO runs daily auctions for capacity
 that must react within seconds when frequency strays from 50 Hz. Win one and you are paid
 a **£/MW/h availability fee** for every hour you are committed, whether or not you are
 actually called. Predictable, contracted income — but the committed capacity has to keep
@@ -117,7 +122,7 @@ frequency excursion being corrected, not the direction the battery moves power. 
 per **EFA block** — six four-hour windows covering the day — so a battery's commitment can
 differ across the day.
 
-**Wholesale arbitrage — opportunistic trading.** Separately, the battery can buy energy
+**Wholesale arbitrage: opportunistic trading.** Separately, the battery can buy energy
 when it is cheap and sell when it is expensive. The profit is the price spread less
 round-trip losses and the wear cost of cycling.
 

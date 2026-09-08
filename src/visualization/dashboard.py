@@ -846,26 +846,32 @@ with sub_gen:
         )
         gen_pivot.index = pd.DatetimeIndex(gen_pivot.index)
 
-        st.subheader("14-Day Rolling Average Generation by Fuel Group")
+        # "generation" is the daily sum of the half-hourly MW readings, so each
+        # reading covers half an hour: multiplying by 0.5 h turns the sum into
+        # energy (MWh). Dividing by the period count would give mean MW instead,
+        # but a daily total reads more naturally as energy.
+        gen_pivot = gen_pivot * 0.5
+
+        st.subheader("28-Day Rolling Average Generation by Fuel Group")
         st.caption(
-            "Daily generation totals are smoothed with a 14-day rolling mean to remove "
-            "day-to-day noise while still resolving seasonal swings within a month. "
+            "Daily generation totals are smoothed with a 28-day rolling mean to remove "
+            "day-to-day noise while still resolving seasonal swings. "
             "Each line represents one fuel group; click items in the legend to isolate sources."
         )
 
-        gen_smooth = gen_pivot.rolling(14, min_periods=7).mean()
+        gen_smooth = gen_pivot.rolling(28, min_periods=14).mean()
         col_order = gen_smooth.sum().sort_values(ascending=False).index
         gen_smooth = gen_smooth[col_order]
 
         melted_weekly = gen_smooth.reset_index().melt(
             id_vars="settlementDate",
             var_name="Fuel Group",
-            value_name="Avg Generation (MW)",
+            value_name="Daily Generation (MWh)",
         )
         fig = px.line(
             melted_weekly,
             x="settlementDate",
-            y="Avg Generation (MW)",
+            y="Daily Generation (MWh)",
             color="Fuel Group",
             labels={"settlementDate": "Date"},
         )
